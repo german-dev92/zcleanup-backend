@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { isValidObjectId, Model } from 'mongoose';
 import { Booking, type BookingDocument } from './schemas/booking.schema';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -101,6 +101,10 @@ export class BookingService {
     id: string,
     status: BookingStatus,
   ): Promise<BookingDocument> {
+    if (!isValidObjectId(id)) {
+      throw new BadRequestException('Invalid booking id');
+    }
+
     const booking = await this.bookingModel.findById(id);
     if (!booking) {
       throw new NotFoundException('Booking not found');
@@ -108,6 +112,20 @@ export class BookingService {
 
     booking.status = status;
     return booking.save();
+  }
+
+  async getBookings(status?: BookingStatus): Promise<BookingDocument[]> {
+    const filter = status ? { status } : {};
+    return this.bookingModel.find(filter).sort({ createdAt: -1 });
+  }
+
+  async getById(id: string): Promise<BookingDocument> {
+    const booking = await this.bookingModel.findById(id);
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    return booking;
   }
 
   private normalizeEmail(email: string): string {

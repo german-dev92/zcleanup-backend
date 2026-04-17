@@ -1,34 +1,68 @@
-import { Body, Controller, Param, Patch, Post, Get } from '@nestjs/common';
-import { IsIn } from 'class-validator';
+import {
+  Body,
+  Controller,
+  Get,
+  Logger,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { IsDefined, IsIn, IsOptional, IsString } from 'class-validator';
 import { BookingService } from './booking.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { BOOKING_STATUSES, type BookingStatus } from './types/booking-status';
 
 class UpdateBookingStatusDto {
-  @IsIn(BOOKING_STATUSES)
+  @IsDefined({ message: 'status is required' })
+  @IsString({ message: 'status must be a string' })
+  @IsIn(BOOKING_STATUSES, {
+    message: `status must be one of: ${BOOKING_STATUSES.join(', ')}`,
+  })
   status: BookingStatus;
+}
+
+class GetBookingsQueryDto {
+  @IsOptional()
+  @IsIn(BOOKING_STATUSES)
+  status?: BookingStatus;
 }
 
 @Controller('booking')
 export class BookingController {
-  constructor(private readonly bookingService: BookingService) { }
-@Get('ping')
-ping() {
-  console.log('PING HIT');
-  return { ok: true };
-}
+  private readonly logger = new Logger(BookingController.name);
+
+  constructor(private readonly bookingService: BookingService) {}
+
+  @Get()
+  getBookings(@Query() query: GetBookingsQueryDto) {
+    return this.bookingService.getBookings(query.status);
+  }
+
+  @Get(':id')
+  getById(@Param('id') id: string) {
+    return this.bookingService.getById(id);
+  }
+
   @Post()
   createBooking(@Body() body: CreateBookingDto) {
     return this.bookingService.createBooking(body);
   }
 
   @Patch(':id/status')
-  updateBookingStatus(
+  async updateBookingStatus(
     @Param('id') id: string,
     @Body() body: UpdateBookingStatusDto,
   ) {
-    console.log('HIT ENDPOINT');
-    return this.bookingService.updateStatus(id, body.status);
-  }
+    this.logger.log('PATCH /booking/:id/status');
+    this.logger.log(`ID: ${id}`);
+    this.logger.log(`BODY: ${JSON.stringify(body)}`);
 
+    const booking = await this.bookingService.updateStatus(id, body.status);
+    return {
+      success: true,
+      message: 'Booking status updated',
+      data: booking,
+    };
+  }
 }
