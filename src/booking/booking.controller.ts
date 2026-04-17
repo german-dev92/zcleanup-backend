@@ -4,10 +4,10 @@ import { CreateBookingDto } from './dto/create-booking.dto';
 
 @Controller('booking')
 export class BookingController {
-    constructor(private readonly bookingService: BookingService) { }
+  constructor(private readonly bookingService: BookingService) {}
 
-    @Post()
-    createBooking(@Body() body: CreateBookingDto) {
-        return this.bookingService.createBooking(body);
-    }
+  @Post()
+  createBooking(@Body() body: CreateBookingDto) {
+    return this.bookingService.createBooking(body);
+  }
 }

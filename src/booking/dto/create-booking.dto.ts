@@ -1,4 +1,6 @@
+import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsEmail,
   IsNotEmpty,
   IsOptional,
@@ -7,7 +9,64 @@ import {
   IsArray,
   IsNumber,
   IsObject,
+  MaxLength,
+  registerDecorator,
+  type ValidationArguments,
+  type ValidationOptions,
 } from 'class-validator';
+
+function MaxRecordValueLength(
+  max: number,
+  validationOptions?: ValidationOptions,
+) {
+  return (object: object, propertyName: string) => {
+    registerDecorator({
+      name: 'maxRecordValueLength',
+      target: object.constructor,
+      propertyName,
+      constraints: [max],
+      options: validationOptions,
+      validator: {
+        validate(value: unknown, args: ValidationArguments) {
+          if (value == null) {
+            return true;
+          }
+          if (typeof value !== 'object') {
+            return false;
+          }
+
+          const [maxLen] = args.constraints as [number];
+          const record = value as Record<string, unknown>;
+
+          for (const recordValue of Object.values(record)) {
+            let stringValue: string;
+            if (recordValue == null) {
+              stringValue = '';
+            } else if (typeof recordValue === 'string') {
+              stringValue = recordValue;
+            } else {
+              try {
+                stringValue = JSON.stringify(recordValue);
+              } catch {
+                return false;
+              }
+            }
+
+            if (stringValue.length > maxLen) {
+              return false;
+            }
+          }
+
+          return true;
+        },
+        defaultMessage(args: ValidationArguments) {
+          const [maxLen] = args.constraints as [number];
+          return `${args.property} values must be at most ${maxLen} characters`;
+        },
+      },
+    });
+  };
+}
 
 export class CreateBookingDto {
   // ======================
@@ -71,10 +130,14 @@ export class CreateBookingDto {
 
   @IsOptional()
   @IsObject()
+  @MaxRecordValueLength(500)
   dynamicFields?: Record<string, any>;
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
   extras?: string[];
 
   // ======================
@@ -82,10 +145,12 @@ export class CreateBookingDto {
   // ======================
 
   @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   estimatedPrice?: number;
 
   @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   finalPricePreview?: number;
 }
