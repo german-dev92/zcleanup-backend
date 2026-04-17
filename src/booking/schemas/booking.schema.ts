@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { BOOKING_STATUSES, type BookingStatus } from '../types/booking-status';
 
 export type BookingDocument = Booking & Document;
 
@@ -36,6 +37,9 @@ export class Booking {
 
   @Prop({ default: false })
   applyFirstDiscount?: boolean;
+
+  @Prop({ type: String, enum: BOOKING_STATUSES, default: 'pending' })
+  status: BookingStatus;
 
   // 🟡 NEGOCIO
   @Prop({ required: false })

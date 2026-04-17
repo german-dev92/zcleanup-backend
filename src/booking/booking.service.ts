@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -10,6 +11,8 @@ import { Booking, type BookingDocument } from './schemas/booking.schema';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DiscountsService } from '../discounts/discounts.service';
+import { normalizeAddress } from '../common/utils/normalize-address';
+import { type BookingStatus } from './types/booking-status';
 
 @Injectable()
 export class BookingService {
@@ -27,9 +30,16 @@ export class BookingService {
         throw new BadRequestException('Email is required');
       }
 
+      const createPayload = { ...data, status: 'pending' as const };
+
       if (data.applyFirstDiscount) {
+        const normalizedAddress = this.requireNormalizedAddress(data.address);
+
         try {
-          const createdBooking = await this.createWithTransaction(data);
+          const createdBooking = await this.createWithTransaction(
+            createPayload,
+            normalizedAddress,
+          );
           this.emitBookingCreatedEvent(createdBooking);
 
           return {
@@ -44,7 +54,10 @@ export class BookingService {
           }
 
           if (this.isTransactionNotSupportedError(error)) {
-            const createdBooking = await this.createWithoutTransaction(data);
+            const createdBooking = await this.createWithoutTransaction(
+              createPayload,
+              normalizedAddress,
+            );
             this.emitBookingCreatedEvent(createdBooking);
 
             return {
@@ -59,7 +72,7 @@ export class BookingService {
         }
       }
 
-      const savedBooking = await this.bookingModel.create(data);
+      const savedBooking = await this.bookingModel.create(createPayload);
 
       this.emitBookingCreatedEvent(savedBooking);
 
@@ -84,8 +97,34 @@ export class BookingService {
     }
   }
 
+  async updateStatus(
+    id: string,
+    status: BookingStatus,
+  ): Promise<BookingDocument> {
+    const booking = await this.bookingModel.findById(id);
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    booking.status = status;
+    return booking.save();
+  }
+
   private normalizeEmail(email: string): string {
     return (email ?? '').toLowerCase().trim();
+  }
+
+  private requireNormalizedAddress(value: unknown): string {
+    if (typeof value !== 'string') {
+      throw new BadRequestException('Address is required to apply discount');
+    }
+
+    const normalized = normalizeAddress(value);
+    if (!normalized) {
+      throw new BadRequestException('Address is required to apply discount');
+    }
+
+    return normalized;
   }
 
   private isDuplicateKeyError(error: unknown): boolean {
@@ -129,7 +168,8 @@ export class BookingService {
   }
 
   private async createWithTransaction(
-    data: CreateBookingDto,
+    data: CreateBookingDto & { status: BookingStatus },
+    normalizedAddress: string,
   ): Promise<BookingDocument> {
     const session = await this.bookingModel.startSession();
 
@@ -141,9 +181,12 @@ export class BookingService {
           session,
         });
 
-        await this.discountsService.markAsUsed(
-          data.email,
-          String(createdBooking._id),
+        await this.discountsService.markAddressAsUsed(
+          {
+            normalizedAddress,
+            email: data.email,
+            bookingId: String(createdBooking._id),
+          },
           session,
         );
 
@@ -163,7 +206,8 @@ export class BookingService {
   }
 
   private async createWithoutTransaction(
-    data: CreateBookingDto,
+    data: CreateBookingDto & { status: BookingStatus },
+    normalizedAddress: string,
   ): Promise<BookingDocument> {
     const bookingWithoutDiscount = {
       ...data,
@@ -173,10 +217,11 @@ export class BookingService {
     const savedBooking = await this.bookingModel.create(bookingWithoutDiscount);
 
     try {
-      await this.discountsService.markAsUsed(
-        data.email,
-        String(savedBooking._id),
-      );
+      await this.discountsService.markAddressAsUsed({
+        normalizedAddress,
+        email: data.email,
+        bookingId: String(savedBooking._id),
+      });
     } catch (error) {
       if (this.isDuplicateKeyError(error)) {
         await this.handleDuplicateDiscount(savedBooking);
