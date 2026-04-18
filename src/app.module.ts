@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { BookingModule } from './booking/booking.module';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { DiscountsModule } from './discounts/discounts.module';
+import { PaymentsModule } from './payments/payments.module';
 
 @Module({
   imports: [
@@ -10,6 +11,7 @@ import { DiscountsModule } from './discounts/discounts.module';
     EventEmitterModule.forRoot(),
     BookingModule,
     DiscountsModule,
+    PaymentsModule,
   ],
 })
 export class AppModule {}
