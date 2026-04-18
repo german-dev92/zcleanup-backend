@@ -8,8 +8,7 @@ import { ValidationPipe } from '@nestjs/common';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  const frontendUrl =
-    process.env.FRONTEND_URL ?? 'http://localhost:4200';
+  const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:4200';
 
   const allowedOrigins = frontendUrl
     .split(',')
@@ -36,10 +35,7 @@ async function bootstrap() {
     // 🔥 FIX CLAVE: incluir PATCH
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 
-    allowedHeaders: [
-      'Content-Type',
-      'Authorization',
-    ],
+    allowedHeaders: ['Content-Type', 'Authorization'],
 
     credentials: true,
   });

@@ -7,6 +7,7 @@ import {
 } from './schemas/discount-used.schema';
 
 import { DiscountsService } from './discounts.service.js';
+import { DiscountsController } from './discounts.controller';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { DiscountsService } from './discounts.service.js';
       },
     ]),
   ],
+  controllers: [DiscountsController],
   providers: [DiscountsService],
 
   // ✅ IMPORTANTE: exportar el service para otros módulos (BookingModule)

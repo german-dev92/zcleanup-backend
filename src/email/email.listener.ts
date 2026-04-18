@@ -1,49 +1,89 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
-import { EmailService, type BookingEmailPayload } from './email.service';
+import { EmailService } from './email.service';
+
+import { BookingEmailPayload, BookingEventType } from './email.builder';
 
 @Injectable()
 export class EmailListener {
   private readonly logger = new Logger(EmailListener.name);
 
-  constructor(private emailService: EmailService) {}
+  constructor(private readonly emailService: EmailService) {}
+
+  // -------------------------
+  // EVENTS
+  // -------------------------
 
   @OnEvent('booking.created')
-  handleBookingCreatedEvent(payload: unknown) {
-    setImmediate(() => {
-      this.emailService
-        .sendBookingEmail(payload as BookingEmailPayload)
-        .catch((error) => {
-          const maskedEmail = this.maskEmail(
-            (payload as { email?: unknown })?.email,
-          );
-          const message = maskedEmail
-            ? `Email event failed (email=${maskedEmail})`
-            : 'Email event failed';
-
-          this.logger.error(
-            message,
-            error instanceof Error ? error.stack : undefined,
-          );
-        });
-    });
+  async onBookingCreated(payload: unknown) {
+    await this.handleEvent('booking.created', payload);
   }
 
-  private maskEmail(value: unknown): string | null {
-    if (typeof value !== 'string') {
-      return null;
+  @OnEvent('booking.confirmed')
+  async onBookingConfirmed(payload: unknown) {
+    await this.handleEvent('booking.confirmed', payload);
+  }
+
+  @OnEvent('booking.cancelled')
+  async onBookingCancelled(payload: unknown) {
+    await this.handleEvent('booking.cancelled', payload);
+  }
+
+  // -------------------------
+  // CORE HANDLER
+  // -------------------------
+
+  private async handleEvent(eventType: BookingEventType, payload: unknown) {
+    try {
+      const booking = payload as BookingEmailPayload;
+
+      if (!booking || !booking.email) {
+        this.logger.error(
+          `[EMAIL] Missing or invalid payload for ${eventType}`,
+        );
+        return;
+      }
+
+      this.logger.log(`[EMAIL] Processing ${eventType} → ${booking.email}`);
+
+      const contractAttachment = this.getContractAttachment(eventType);
+
+      await this.emailService.sendBookingEventEmail({
+        eventType,
+        booking,
+        contractAttachment,
+      });
+
+      this.logger.log(`[EMAIL] Sent successfully → ${eventType}`);
+    } catch (error) {
+      this.logger.error(
+        `[EMAIL] Failed event ${eventType}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
+  }
+
+  // -------------------------
+  // CONTRACT SAFE LOGIC
+  // -------------------------
+
+  private getContractAttachment(eventType: BookingEventType) {
+    if (eventType !== 'booking.confirmed') {
+      return { enabled: false };
     }
 
-    const email = value.trim();
-    const atIndex = email.indexOf('@');
-    if (atIndex <= 0 || atIndex === email.length - 1) {
-      return null;
+    const filePath = process.env.CONTRACT_PATH;
+
+    if (!filePath) {
+      this.logger.warn(
+        '[EMAIL] CONTRACT_PATH not defined → sending without contract',
+      );
+      return { enabled: false };
     }
 
-    const local = email.slice(0, atIndex);
-    const domain = email.slice(atIndex + 1);
-
-    const visibleLocal = local.slice(0, 2);
-    return `${visibleLocal}***@${domain}`;
+    return {
+      enabled: true,
+      filePath,
+    };
   }
 }

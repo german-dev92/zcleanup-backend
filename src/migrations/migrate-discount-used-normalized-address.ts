@@ -10,12 +10,6 @@ type BookingAddressRecord = {
   address?: string;
 };
 
-type DiscountUsedRecord = {
-  email: string;
-  normalizedAddress?: string;
-  bookingId?: string;
-};
-
 type DiscountUsedCursorRecord = {
   _id: mongoose.Types.ObjectId;
   bookingId?: string;
@@ -40,11 +34,10 @@ export async function migrateDiscountUsedNormalizedAddress(): Promise<DiscountUs
   await mongoose.connect(mongoUri);
 
   const BookingModel =
-    (mongoose.models.Booking as mongoose.Model<BookingAddressRecord>) ??
-    mongoose.model<BookingAddressRecord>('Booking', BookingSchema);
+    mongoose.models.Booking ?? mongoose.model('Booking', BookingSchema);
   const DiscountUsedModel =
-    (mongoose.models.DiscountUsed as mongoose.Model<DiscountUsedRecord>) ??
-    mongoose.model<DiscountUsedRecord>('DiscountUsed', DiscountUsedSchema);
+    mongoose.models.DiscountUsed ??
+    mongoose.model('DiscountUsed', DiscountUsedSchema);
 
   try {
     try {

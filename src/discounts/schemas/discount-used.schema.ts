@@ -5,8 +5,8 @@ export type DiscountUsedDocument = DiscountUsed & Document;
 
 @Schema({ timestamps: true })
 export class DiscountUsed {
-  @Prop({ required: true })
-  email: string;
+  @Prop({ required: false })
+  email?: string;
 
   @Prop({ required: false, unique: true, sparse: true })
   normalizedAddress?: string;
