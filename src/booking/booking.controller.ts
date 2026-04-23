@@ -7,11 +7,15 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { IsDefined, IsIn, IsOptional, IsString } from 'class-validator';
 import { BookingService } from './booking.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { BOOKING_STATUSES, type BookingStatus } from './types/booking-status';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { Roles } from '../auth/roles.decorator';
+import { RolesGuard } from '../auth/roles.guard';
 
 class UpdateBookingStatusDto {
   @IsDefined({ message: 'status is required' })
@@ -35,6 +39,8 @@ export class BookingController {
   constructor(private readonly bookingService: BookingService) {}
 
   @Get()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   getBookings(@Query() query: GetBookingsQueryDto) {
     return this.bookingService.getBookings(query.status);
   }
@@ -50,6 +56,8 @@ export class BookingController {
   }
 
   @Patch(':id/status')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   async updateBookingStatus(
     @Param('id') id: string,
     @Body() body: UpdateBookingStatusDto,

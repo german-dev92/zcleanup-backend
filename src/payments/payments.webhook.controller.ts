@@ -2,6 +2,7 @@ import {
   Controller,
   Headers,
   HttpCode,
+  Logger,
   Post,
   Req,
   UnauthorizedException,
@@ -14,6 +15,8 @@ type RawBodyRequest = {
 
 @Controller('payments')
 export class PaymentsWebhookController {
+  private readonly logger = new Logger(PaymentsWebhookController.name);
+
   constructor(private readonly webhookService: PaymentsWebhookService) {}
 
   @Post('webhook')
@@ -22,7 +25,7 @@ export class PaymentsWebhookController {
     @Req() req: RawBodyRequest,
     @Headers('stripe-signature') signature: string | undefined,
   ) {
-    console.log('[STRIPE WEBHOOK] Received');
+    this.logger.debug(JSON.stringify({ event: 'stripe.webhook.received' }));
 
     if (!signature) {
       throw new UnauthorizedException();

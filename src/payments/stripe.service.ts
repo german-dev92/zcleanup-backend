@@ -4,6 +4,14 @@ import { type BookingDocument } from '../booking/schemas/booking.schema';
 
 type StripeClient = InstanceType<typeof Stripe>;
 
+export type StripeCheckoutSessionDetails = {
+  id: string;
+  url: string;
+  amountTotal: number | null;
+  currency: string | null;
+  paymentIntentId: string | null;
+};
+
 @Injectable()
 export class StripeService {
   private stripe: StripeClient | null = null;
@@ -34,6 +42,13 @@ export class StripeService {
   }
 
   async createCheckoutSession(booking: BookingDocument): Promise<string> {
+    const details = await this.createCheckoutSessionDetails(booking);
+    return details.url;
+  }
+
+  async createCheckoutSessionDetails(
+    booking: BookingDocument,
+  ): Promise<StripeCheckoutSessionDetails> {
     const price = booking.finalPricePreview;
     const isValidPrice =
       typeof price === 'number' && Number.isFinite(price) && price > 0;
@@ -86,6 +101,21 @@ export class StripeService {
       );
     }
 
-    return session.url;
+    const paymentIntentId =
+      typeof session.payment_intent === 'string'
+        ? session.payment_intent
+        : null;
+    const amountTotal =
+      typeof session.amount_total === 'number' ? session.amount_total : null;
+    const currency =
+      typeof session.currency === 'string' ? session.currency : null;
+
+    return {
+      id: session.id,
+      url: session.url,
+      amountTotal,
+      currency,
+      paymentIntentId,
+    };
   }
 }

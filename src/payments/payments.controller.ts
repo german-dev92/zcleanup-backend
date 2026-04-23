@@ -1,6 +1,8 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
 import { IsNotEmpty, IsString } from 'class-validator';
 import { PaymentsService } from './payments.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import type { AuthUser } from '../auth/auth.types';
 
 class CreateCheckoutSessionDto {
   @IsString()
@@ -13,9 +15,14 @@ export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
   @Post('checkout-session')
-  async createCheckoutSession(@Body() body: CreateCheckoutSessionDto) {
+  @UseGuards(JwtAuthGuard)
+  async createCheckoutSession(
+    @Body() body: CreateCheckoutSessionDto,
+    @Req() req: { user?: AuthUser },
+  ) {
     const url = await this.paymentsService.createCheckoutSessionUrl(
       body.bookingId,
+      req.user,
     );
 
     return { url };

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import nodemailer, { type Transporter } from 'nodemailer';
 
 import { EmailBuilder } from './email.builder.js';
@@ -12,6 +12,7 @@ import type {
 @Injectable()
 export class EmailService {
   private transporter: Transporter;
+  private readonly logger = new Logger(EmailService.name);
 
   constructor(private readonly emailBuilder: EmailBuilder) {
     this.transporter = nodemailer.createTransport({
@@ -61,16 +62,14 @@ export class EmailService {
       attachments: builtEmail.attachments,
     });
 
-    console.log('[EMAIL] Sent successfully');
-    console.log('[EMAIL] Event:', eventType);
-    console.log('[EMAIL] To:', toEmail);
-
     const messageId =
       typeof result === 'object' && result !== null && 'messageId' in result
         ? (result as { messageId?: unknown }).messageId
         : undefined;
 
-    console.log('[EMAIL] Message ID:', messageId);
+    this.logger.log(
+      JSON.stringify({ event: 'email.sent', eventType, messageId }),
+    );
 
     return result;
   }

@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -13,14 +14,26 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DiscountsService } from '../discounts/discounts.service';
 import { normalizeAddress } from '../common/utils/normalize-address';
 import { BookingStatus } from './types/booking-status';
+import { StripeService } from '../payments/stripe.service';
+import {
+  Payment,
+  type PaymentDocument,
+} from '../payments/schemas/payment.schema';
+import { BookingStateService } from './booking-state.service';
 
 @Injectable()
 export class BookingService {
+  private readonly logger = new Logger(BookingService.name);
+
   constructor(
     @InjectModel(Booking.name)
     private bookingModel: Model<BookingDocument>,
+    @InjectModel(Payment.name)
+    private paymentModel: Model<PaymentDocument>,
     private eventEmitter: EventEmitter2,
     private discountsService: DiscountsService,
+    private stripeService: StripeService,
+    private bookingStateService: BookingStateService,
   ) {}
 
   async createBooking(data: CreateBookingDto) {
@@ -35,7 +48,9 @@ export class BookingService {
         data.estimatedPrice !== undefined ||
         data.finalPricePreview !== undefined
       ) {
-        console.log('[PRICING] Ignoring client-provided pricing snapshot');
+        this.logger.debug(
+          JSON.stringify({ event: 'pricing.client_snapshot_ignored' }),
+        );
       }
 
       const desiredAt = this.parseDesiredDateTime(
@@ -49,16 +64,22 @@ export class BookingService {
       }
 
       const wantsDiscountRequested = data.applyFirstDiscount === true;
-      const normalizedAddress = wantsDiscountRequested
-        ? this.requireNormalizedAddress(data.address)
-        : this.normalizeAddressIfPresent(data.address);
+      let normalizedAddress: string | null = null;
+      if (wantsDiscountRequested) {
+        normalizedAddress = this.requireNormalizedAddress(data.address);
+      }
 
-      const discountEligible =
-        normalizedAddress !== null
-          ? !(await this.discountsService.hasUsedDiscountByNormalizedAddress(
-              normalizedAddress,
-            ))
-          : false;
+      let discountEligible = false;
+      if (wantsDiscountRequested) {
+        const normalizedAddressForDiscount = normalizedAddress;
+        if (!normalizedAddressForDiscount) {
+          throw new BadRequestException('Address is required');
+        }
+        discountEligible =
+          !(await this.discountsService.hasUsedDiscountByNormalizedAddress(
+            normalizedAddressForDiscount,
+          ));
+      }
 
       if (wantsDiscountRequested && !normalizedAddress) {
         throw new BadRequestException('Address is required');
@@ -67,18 +88,50 @@ export class BookingService {
         throw new ConflictException('Discount already used for this address');
       }
 
-      const discountApplied = discountEligible && normalizedAddress !== null;
+      const discountApplied =
+        wantsDiscountRequested &&
+        discountEligible &&
+        normalizedAddress !== null;
       const pricing = this.calculatePricing(data, discountApplied);
+
+      this.logger.debug(
+        JSON.stringify({
+          event: 'discount.evaluated',
+          requested: wantsDiscountRequested,
+          eligible: discountEligible,
+          applied: discountApplied,
+        }),
+      );
+      this.logger.debug(
+        JSON.stringify({
+          event: 'pricing.computed',
+          estimatedPrice: pricing.estimatedPrice,
+          finalPrice: pricing.finalPrice,
+        }),
+      );
 
       const existing = await this.findRecentDuplicateBooking(data);
       if (existing) {
         const existingEstimated =
           existing.estimatedPrice ?? pricing.estimatedPrice;
         const existingFinal = existing.finalPricePreview ?? pricing.finalPrice;
+        if (
+          typeof existing.finalPricePreview === 'number' &&
+          existing.finalPricePreview !== pricing.finalPrice
+        ) {
+          this.logger.warn(
+            JSON.stringify({
+              event: 'pricing.mismatch',
+              bookingId: String(existing._id),
+              storedFinalPricePreview: existing.finalPricePreview,
+              computedFinalPrice: pricing.finalPrice,
+            }),
+          );
+        }
         return {
           success: true,
           message: 'Booking saved successfully',
-          data: existing,
+          data: this.toFrontendBooking(existing),
           discountApplied: existing.applyFirstDiscount === true,
           pricing: {
             estimatedPrice: existingEstimated,
@@ -97,12 +150,13 @@ export class BookingService {
             normalizedAddress,
             pricing,
           );
+          this.logPricingMismatchIfDetected(createdBooking, pricing.finalPrice);
           this.emitBookingCreatedEvent(createdBooking);
 
           return {
             success: true,
             message: 'Booking saved successfully',
-            data: createdBooking,
+            data: this.toFrontendBooking(createdBooking),
             discountApplied: true,
             pricing: {
               estimatedPrice: pricing.estimatedPrice,
@@ -112,17 +166,26 @@ export class BookingService {
           };
         } catch (error) {
           if (this.isTransactionNotSupportedError(error)) {
+            this.logger.warn(
+              JSON.stringify({
+                event: 'discount.fallback_without_transaction',
+              }),
+            );
             const createdBooking = await this.createWithDiscountRollback(
               bookingData,
               normalizedAddress,
               pricing,
+            );
+            this.logPricingMismatchIfDetected(
+              createdBooking,
+              pricing.finalPrice,
             );
             this.emitBookingCreatedEvent(createdBooking);
 
             return {
               success: true,
               message: 'Booking saved successfully',
-              data: createdBooking,
+              data: this.toFrontendBooking(createdBooking),
               discountApplied: true,
               pricing: {
                 estimatedPrice: pricing.estimatedPrice,
@@ -145,12 +208,13 @@ export class BookingService {
       };
 
       const createdBooking = await this.bookingModel.create(payload);
+      this.logPricingMismatchIfDetected(createdBooking, pricing.finalPrice);
       this.emitBookingCreatedEvent(createdBooking);
 
       return {
         success: true,
         message: 'Booking saved successfully',
-        data: createdBooking,
+        data: this.toFrontendBooking(createdBooking),
         discountApplied: false,
         pricing: {
           estimatedPrice: pricing.estimatedPrice,
@@ -175,15 +239,93 @@ export class BookingService {
     if (!booking) throw new NotFoundException('Booking not found');
 
     const previous = booking.status;
-    booking.status = status;
+    const next = this.bookingStateService.transitionBooking({
+      current: previous,
+      next: status,
+      source: 'admin',
+    });
+
+    if (previous !== next && next === 'confirmed') {
+      const expectedAmount = booking.finalPricePreview;
+      const isValidPrice =
+        typeof expectedAmount === 'number' &&
+        Number.isFinite(expectedAmount) &&
+        expectedAmount > 0;
+      if (!isValidPrice) {
+        throw new InternalServerErrorException('Invalid booking price');
+      }
+
+      const existingPayment = await this.paymentModel.findOne({
+        bookingId: String(booking._id),
+        provider: 'stripe',
+      });
+      if (
+        existingPayment &&
+        typeof existingPayment.amount === 'number' &&
+        existingPayment.amount !== expectedAmount
+      ) {
+        throw new InternalServerErrorException('Payment amount mismatch');
+      }
+
+      const existingUrl =
+        typeof booking.paymentUrl === 'string' ? booking.paymentUrl.trim() : '';
+      if (existingUrl) {
+        await this.paymentModel.findOneAndUpdate(
+          { bookingId: String(booking._id), provider: 'stripe' },
+          {
+            $setOnInsert: {
+              bookingId: String(booking._id),
+              provider: 'stripe',
+              status: 'pending',
+              amount: expectedAmount,
+              currency: 'usd',
+            },
+          },
+          { upsert: true },
+        );
+      } else {
+        const details =
+          await this.stripeService.createCheckoutSessionDetails(booking);
+        const currency = details.currency ?? 'usd';
+        const amountFromStripe =
+          typeof details.amountTotal === 'number'
+            ? details.amountTotal / 100
+            : null;
+        if (amountFromStripe !== null && amountFromStripe !== expectedAmount) {
+          throw new InternalServerErrorException('Stripe amount mismatch');
+        }
+
+        await this.paymentModel.findOneAndUpdate(
+          { bookingId: String(booking._id), provider: 'stripe' },
+          {
+            $setOnInsert: {
+              bookingId: String(booking._id),
+              provider: 'stripe',
+              status: 'pending',
+              amount: expectedAmount,
+              currency,
+            },
+            $set: {
+              checkoutSessionId: details.id,
+              paymentIntentId: details.paymentIntentId ?? undefined,
+            },
+          },
+          { upsert: true },
+        );
+
+        booking.paymentUrl = details.url;
+      }
+    }
+
+    booking.status = next;
 
     const updated = await booking.save();
 
-    if (previous !== status) {
-      if (status === 'confirmed') {
+    if (previous !== next) {
+      if (next === 'confirmed') {
         this.eventEmitter.emit('booking.confirmed', updated);
       }
-      if (status === 'cancelled') {
+      if (next === 'cancelled') {
         this.eventEmitter.emit('booking.cancelled', updated);
       }
     }
@@ -330,7 +472,7 @@ export class BookingService {
       status: 'pending' as const,
       applyFirstDiscount: false,
       estimatedPrice: pricing.estimatedPrice,
-      finalPricePreview: pricing.estimatedPrice,
+      finalPricePreview: pricing.finalPrice,
     };
 
     const createdBooking = await this.bookingModel.create(bookingPayload);
@@ -479,5 +621,38 @@ export class BookingService {
 
   private roundCurrency(value: number): number {
     return Math.round(value * 100) / 100;
+  }
+
+  private toFrontendBooking(booking: BookingDocument): Record<string, unknown> {
+    const obj =
+      typeof booking.toObject === 'function'
+        ? (booking.toObject() as Record<string, unknown>)
+        : (booking as unknown as Record<string, unknown>);
+
+    const statusValue = obj.status;
+    const safeStatus = typeof statusValue === 'string' ? statusValue : '';
+
+    return {
+      ...obj,
+      _id: String(booking._id),
+      status: safeStatus,
+    };
+  }
+
+  private logPricingMismatchIfDetected(
+    booking: BookingDocument,
+    expectedFinalPrice: number,
+  ) {
+    const stored = booking.finalPricePreview;
+    if (typeof stored === 'number' && stored !== expectedFinalPrice) {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'pricing.mismatch',
+          bookingId: String(booking._id),
+          storedFinalPricePreview: stored,
+          expectedFinalPrice,
+        }),
+      );
+    }
   }
 }

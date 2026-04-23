@@ -4,11 +4,15 @@ import { BookingModule } from './booking/booking.module';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { DiscountsModule } from './discounts/discounts.module';
 import { PaymentsModule } from './payments/payments.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
-    MongooseModule.forRoot(process.env.MONGO_URI!),
+    MongooseModule.forRoot(process.env.MONGO_URI!, {
+      autoIndex: process.env.NODE_ENV !== 'production',
+    }),
     EventEmitterModule.forRoot(),
+    AuthModule,
     BookingModule,
     DiscountsModule,
     PaymentsModule,

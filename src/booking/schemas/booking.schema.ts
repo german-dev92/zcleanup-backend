@@ -55,6 +55,9 @@ export class Booking {
   @Prop({ type: Number, required: false })
   finalPricePreview?: number;
 
+  @Prop({ required: false })
+  paymentUrl?: string;
+
   // 🔵 DINÁMICO (CLAVE DEL SISTEMA)
   @Prop({ type: Object, required: false })
   dynamicFields?: Record<string, any>;

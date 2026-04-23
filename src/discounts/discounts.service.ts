@@ -1,4 +1,4 @@
-import { Injectable, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Model } from 'mongoose';
 import { DiscountUsed } from './schemas/discount-used.schema';
@@ -6,30 +6,23 @@ import { normalizeAddress } from '../common/utils/normalize-address';
 
 @Injectable()
 export class DiscountsService implements OnModuleInit {
+  private readonly logger = new Logger(DiscountsService.name);
+
   constructor(
     @InjectModel(DiscountUsed.name)
     private discountModel: Model<DiscountUsed>,
   ) {}
 
-  async onModuleInit() {
-    try {
-      const indexes = await this.discountModel.collection.indexes();
-      const emailUniqueIndexes = indexes.filter(
-        (index) => index?.unique === true && index?.key?.email === 1,
+  onModuleInit() {
+    const nodeEnv =
+      typeof process.env.NODE_ENV === 'string' ? process.env.NODE_ENV : '';
+    if (nodeEnv === 'production') {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'discount.index_migration_required',
+          index: 'normalizedAddress_unique',
+        }),
       );
-
-      for (const index of emailUniqueIndexes) {
-        if (typeof index?.name === 'string' && index.name) {
-          await this.discountModel.collection.dropIndex(index.name);
-        }
-      }
-
-      await this.discountModel.collection.createIndex(
-        { normalizedAddress: 1 },
-        { unique: true, sparse: true },
-      );
-    } catch (error) {
-      console.log('[DISCOUNT INDEX]', 'index sync skipped', error);
     }
   }
 
@@ -42,7 +35,6 @@ export class DiscountsService implements OnModuleInit {
     normalizedAddress: string,
   ): Promise<boolean> {
     const normalized = normalizeAddress(normalizedAddress);
-    console.log('[DISCOUNT CHECK]', normalized);
     const existing = await this.discountModel.findOne({
       normalizedAddress: normalized,
     });
