@@ -11,7 +11,7 @@ import {
   type BookingDocument,
 } from '../booking/schemas/booking.schema';
 import { Payment, type PaymentDocument } from './schemas/payment.schema';
-import { StripeService } from './stripe.service';
+import { StripeService, toStripeAmountCents } from './stripe.service';
 
 type StripeWebhookEvent = {
   type: string;
@@ -169,16 +169,45 @@ export class PaymentsWebhookService {
       return;
     }
 
-    const amountFromStripe =
-      typeof amountTotal === 'number' ? amountTotal / 100 : null;
-    if (amountFromStripe !== null && amountFromStripe !== expectedAmount) {
+    const expectedAmountCents = toStripeAmountCents(expectedAmount);
+    if (
+      !Number.isSafeInteger(expectedAmountCents) ||
+      expectedAmountCents <= 0
+    ) {
+      this.logger.error(
+        JSON.stringify({
+          event: 'stripe.webhook.refused',
+          reason: 'invalid_booking_price_cents',
+          bookingId,
+        }),
+      );
+      return;
+    }
+
+    const amountTotalCents =
+      typeof amountTotal === 'number' ? amountTotal : null;
+    if (
+      amountTotalCents === null ||
+      !Number.isSafeInteger(amountTotalCents) ||
+      amountTotalCents <= 0
+    ) {
+      this.logger.error(
+        JSON.stringify({
+          event: 'stripe.webhook.refused',
+          reason: 'invalid_stripe_amount_total',
+          bookingId,
+        }),
+      );
+      return;
+    }
+    if (amountTotalCents !== expectedAmountCents) {
       this.logger.error(
         JSON.stringify({
           event: 'stripe.webhook.refused',
           reason: 'amount_mismatch',
           bookingId,
-          expectedAmount,
-          amountFromStripe,
+          expectedAmountCents,
+          amountTotalCents,
         }),
       );
       return;
@@ -219,13 +248,18 @@ export class PaymentsWebhookService {
       return;
     }
 
-    if (updatedPayment.amount !== expectedAmount) {
+    const storedAmountCents =
+      typeof updatedPayment.amount === 'number'
+        ? toStripeAmountCents(updatedPayment.amount)
+        : null;
+    if (storedAmountCents !== expectedAmountCents) {
       this.logger.error(
         JSON.stringify({
           event: 'stripe.webhook.refused',
           reason: 'payment_record_amount_mismatch',
           bookingId,
-          expectedAmount,
+          expectedAmountCents,
+          storedAmountCents,
           storedAmount: updatedPayment.amount,
         }),
       );

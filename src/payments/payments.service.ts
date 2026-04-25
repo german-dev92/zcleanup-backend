@@ -12,7 +12,7 @@ import {
   type BookingDocument,
 } from '../booking/schemas/booking.schema';
 import { Payment, type PaymentDocument } from './schemas/payment.schema';
-import { StripeService } from './stripe.service';
+import { StripeService, toStripeAmountCents } from './stripe.service';
 import type { AuthUser } from '../auth/auth.types';
 import { UserRole } from '../auth/roles.enum';
 
@@ -78,6 +78,13 @@ export class PaymentsService {
     ) {
       throw new BadRequestException('Invalid booking price');
     }
+    const expectedAmountCents = toStripeAmountCents(expectedAmount);
+    if (
+      !Number.isSafeInteger(expectedAmountCents) ||
+      expectedAmountCents <= 0
+    ) {
+      throw new BadRequestException('Invalid booking price');
+    }
 
     const existingPayment = await this.paymentModel.findOne({
       bookingId: String(booking._id),
@@ -86,7 +93,7 @@ export class PaymentsService {
     if (
       existingPayment &&
       typeof existingPayment.amount === 'number' &&
-      existingPayment.amount !== expectedAmount
+      toStripeAmountCents(existingPayment.amount) !== expectedAmountCents
     ) {
       throw new BadRequestException('Payment amount mismatch');
     }
@@ -95,11 +102,9 @@ export class PaymentsService {
       await this.stripeService.createCheckoutSessionDetails(booking);
 
     const currency = details.currency ?? 'usd';
-    const amountFromStripe =
-      typeof details.amountTotal === 'number'
-        ? details.amountTotal / 100
-        : null;
-    if (amountFromStripe !== null && amountFromStripe !== expectedAmount) {
+    const amountTotalCents =
+      typeof details.amountTotal === 'number' ? details.amountTotal : null;
+    if (amountTotalCents !== null && amountTotalCents !== expectedAmountCents) {
       throw new BadRequestException('Stripe amount mismatch');
     }
 
@@ -123,7 +128,7 @@ export class PaymentsService {
 
     if (
       typeof savedPayment.amount === 'number' &&
-      savedPayment.amount !== expectedAmount
+      toStripeAmountCents(savedPayment.amount) !== expectedAmountCents
     ) {
       throw new BadRequestException('Payment amount mismatch');
     }

@@ -4,6 +4,11 @@ import { type BookingDocument } from '../booking/schemas/booking.schema';
 
 type StripeClient = InstanceType<typeof Stripe>;
 
+export function toStripeAmountCents(amount: number): number {
+  const cents = Math.round((amount + Number.EPSILON) * 100);
+  return cents;
+}
+
 export type StripeCheckoutSessionDetails = {
   id: string;
   url: string;
@@ -56,7 +61,10 @@ export class StripeService {
       throw new InternalServerErrorException('Invalid booking price');
     }
 
-    const unitAmount = Math.round(price * 100);
+    const unitAmount = toStripeAmountCents(price);
+    if (!Number.isSafeInteger(unitAmount) || unitAmount <= 0) {
+      throw new InternalServerErrorException('Invalid booking price');
+    }
 
     const frontendBase =
       (process.env.FRONTEND_URL ?? 'http://localhost:4200')

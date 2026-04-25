@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -74,11 +73,10 @@ export class EmployeesService {
       throw new BadRequestException('Password is required');
     }
 
-    if (input.role === UserRole.ADMIN) {
-      throw new ForbiddenException('Cannot assign admin role');
-    }
     const role =
-      input.role === UserRole.SUPERVISOR || input.role === UserRole.EMPLOYEE
+      input.role === UserRole.ADMIN ||
+      input.role === UserRole.SUPERVISOR ||
+      input.role === UserRole.EMPLOYEE
         ? input.role
         : UserRole.EMPLOYEE;
 
@@ -268,10 +266,11 @@ export class EmployeesService {
       throw new BadRequestException('Invalid employee id');
     }
 
-    if (role === UserRole.ADMIN) {
-      throw new ForbiddenException('Cannot assign admin role');
-    }
-    if (role !== UserRole.EMPLOYEE && role !== UserRole.SUPERVISOR) {
+    if (
+      role !== UserRole.ADMIN &&
+      role !== UserRole.EMPLOYEE &&
+      role !== UserRole.SUPERVISOR
+    ) {
       throw new BadRequestException('Invalid role');
     }
 
@@ -365,10 +364,8 @@ export class EmployeesService {
     }
 
     if (input.role !== undefined) {
-      if (input.role === UserRole.ADMIN) {
-        throw new ForbiddenException('Cannot assign admin role');
-      }
       if (
+        input.role !== UserRole.ADMIN &&
         input.role !== UserRole.EMPLOYEE &&
         input.role !== UserRole.SUPERVISOR
       ) {

@@ -15,7 +15,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DiscountsService } from '../discounts/discounts.service';
 import { normalizeAddress } from '../common/utils/normalize-address';
 import { BookingStatus } from './types/booking-status';
-import { StripeService } from '../payments/stripe.service';
+import { StripeService, toStripeAmountCents } from '../payments/stripe.service';
 import {
   Payment,
   type PaymentDocument,
@@ -300,6 +300,13 @@ export class BookingService {
       if (!isValidPrice) {
         throw new InternalServerErrorException('Invalid booking price');
       }
+      const expectedAmountCents = toStripeAmountCents(expectedAmount);
+      if (
+        !Number.isSafeInteger(expectedAmountCents) ||
+        expectedAmountCents <= 0
+      ) {
+        throw new InternalServerErrorException('Invalid booking price');
+      }
 
       const existingPayment = await this.paymentModel.findOne({
         bookingId: String(booking._id),
@@ -308,7 +315,7 @@ export class BookingService {
       if (
         existingPayment &&
         typeof existingPayment.amount === 'number' &&
-        existingPayment.amount !== expectedAmount
+        toStripeAmountCents(existingPayment.amount) !== expectedAmountCents
       ) {
         throw new InternalServerErrorException('Payment amount mismatch');
       }
@@ -333,11 +340,12 @@ export class BookingService {
         const details =
           await this.stripeService.createCheckoutSessionDetails(booking);
         const currency = details.currency ?? 'usd';
-        const amountFromStripe =
-          typeof details.amountTotal === 'number'
-            ? details.amountTotal / 100
-            : null;
-        if (amountFromStripe !== null && amountFromStripe !== expectedAmount) {
+        const amountTotalCents =
+          typeof details.amountTotal === 'number' ? details.amountTotal : null;
+        if (
+          amountTotalCents !== null &&
+          amountTotalCents !== expectedAmountCents
+        ) {
           throw new InternalServerErrorException('Stripe amount mismatch');
         }
 
@@ -641,7 +649,8 @@ export class BookingService {
         typeof booking.assignedSupervisor === 'object' &&
         'employeeId' in booking.assignedSupervisor
           ? String(
-              (booking.assignedSupervisor as { employeeId?: unknown }).employeeId,
+              (booking.assignedSupervisor as { employeeId?: unknown })
+                .employeeId,
             )
           : '';
       if (!supervisorId) {
@@ -734,7 +743,8 @@ export class BookingService {
         typeof booking.assignedSupervisor === 'object' &&
         'employeeId' in booking.assignedSupervisor
           ? String(
-              (booking.assignedSupervisor as { employeeId?: unknown }).employeeId,
+              (booking.assignedSupervisor as { employeeId?: unknown })
+                .employeeId,
             )
           : '';
       if (!supervisorId) {
@@ -1597,7 +1607,16 @@ export class BookingService {
   }
 
   private calculatePostConstruction(hours: number, cleaners: number): number {
-    return hours * cleaners * 60;
+    const h = Number.isFinite(hours) ? Math.max(1, Math.trunc(hours)) : 1;
+    const cRaw = Number.isFinite(cleaners)
+      ? Math.max(1, Math.trunc(cleaners))
+      : 1;
+    const c = Math.min(3, cRaw);
+
+    const extraHours = Math.max(0, h - 1);
+    const extraCleaners = Math.max(0, c - 1);
+
+    return 60 + extraHours * 40 + extraCleaners * 20;
   }
 
   private calculateWindow(windowCount: number): number {

@@ -50,6 +50,24 @@ export async function migrateIndexes(): Promise<IndexResult[]> {
         options: { unique: true, sparse: true },
       })),
     );
+    results.push(
+      ...(await ensureUniqueIndex({
+        model: DiscountUsedModel,
+        collection: 'discountuseds',
+        keys: { email: 1 },
+        indexName: 'email_1_unique',
+        options: { unique: true, sparse: true },
+      })),
+    );
+    results.push(
+      ...(await ensureIndex({
+        model: DiscountUsedModel,
+        collection: 'discountuseds',
+        keys: { bookingId: 1 },
+        indexName: 'bookingId_1',
+        options: {},
+      })),
+    );
 
     results.push(
       ...(await ensureIndex({
@@ -171,6 +189,9 @@ async function ensureIndex(params: {
 async function run() {
   const results = await migrateIndexes();
   process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
+  if (results.some((r) => r.action === 'failed')) {
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1]?.includes('migrate-indexes')) {

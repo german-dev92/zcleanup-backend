@@ -5,7 +5,7 @@ export type DiscountUsedDocument = DiscountUsed & Document;
 
 @Schema({ timestamps: true })
 export class DiscountUsed {
-  @Prop({ required: false })
+  @Prop({ required: false, lowercase: true, trim: true })
   email?: string;
 
   @Prop({ required: false, unique: true, sparse: true })
@@ -19,3 +19,6 @@ export class DiscountUsed {
 }
 
 export const DiscountUsedSchema = SchemaFactory.createForClass(DiscountUsed);
+
+DiscountUsedSchema.index({ email: 1 }, { unique: true, sparse: true });
+DiscountUsedSchema.index({ bookingId: 1 });

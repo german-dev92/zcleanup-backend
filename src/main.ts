@@ -17,6 +17,12 @@ import { randomUUID } from 'crypto';
 import { Observable, throwError } from 'rxjs';
 import { catchError, tap } from 'rxjs/operators';
 import type { ValidationError } from 'class-validator';
+import { createClient } from 'redis';
+import {
+  createRedisRateLimitMiddleware,
+  type RateLimitRule,
+} from './common/rate-limit/redis-rate-limiter';
+import mongoose from 'mongoose';
 
 type RequestWithId = Request & { requestId?: string };
 
@@ -218,81 +224,99 @@ async function bootstrap() {
     next();
   });
 
+  const trustProxyRaw =
+    typeof process.env.TRUST_PROXY === 'string' ? process.env.TRUST_PROXY : '';
+  const trustProxyTrimmed = trustProxyRaw.trim();
+  if (trustProxyTrimmed && trustProxyTrimmed !== 'false') {
+    const parsed = Number(trustProxyTrimmed);
+    const value =
+      trustProxyTrimmed === 'true'
+        ? 1
+        : Number.isFinite(parsed)
+          ? Math.max(0, Math.trunc(parsed))
+          : trustProxyTrimmed;
+    (app as unknown as { set: (key: string, value: unknown) => void }).set(
+      'trust proxy',
+      value,
+    );
+  }
+
   const bookingRateLimitWindowMs = Number(
     process.env.BOOKING_RATE_WINDOW_MS ?? 60_000,
   );
   const bookingRateLimitMax = Number(process.env.BOOKING_RATE_MAX ?? 20);
-  const bookingRateLimitEnabled =
-    bookingRateLimitWindowMs > 0 && bookingRateLimitMax > 0;
-  const bookingRateState = new Map<
-    string,
-    { count: number; resetAt: number }
-  >();
 
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    if (!bookingRateLimitEnabled) return next();
-    if (req.method !== 'POST') return next();
-    const path = typeof req.path === 'string' ? req.path : '';
-    if (path !== '/booking') return next();
+  const authRateLimitWindowMs = Number(
+    process.env.AUTH_RATE_WINDOW_MS ?? 60_000,
+  );
+  const authRateLimitMax = Number(process.env.AUTH_RATE_MAX ?? 10);
 
-    const requestId =
-      typeof (req as RequestWithId).requestId === 'string' &&
-      (req as RequestWithId).requestId?.trim()
-        ? (req as RequestWithId).requestId
-        : undefined;
-
-    const forwardedFor = req.headers['x-forwarded-for'];
-    const rawForwarded =
-      typeof forwardedFor === 'string'
-        ? forwardedFor
-        : Array.isArray(forwardedFor)
-          ? forwardedFor.join(',')
-          : '';
-    const forwardedIp = rawForwarded.split(',')[0]?.trim();
-    const socketInfo = req.socket as unknown as { remoteAddress?: unknown };
-    const socketRemoteAddress =
-      typeof socketInfo?.remoteAddress === 'string'
-        ? socketInfo.remoteAddress
-        : undefined;
-    const ip = forwardedIp || req.ip || socketRemoteAddress || 'unknown';
-
-    const now = Date.now();
-    if (bookingRateState.size > 20000) {
-      let scanned = 0;
-      for (const [key, value] of bookingRateState) {
-        if (value.resetAt <= now) {
-          bookingRateState.delete(key);
-        }
-        scanned += 1;
-        if (scanned >= 500) break;
-      }
-    }
-    const current = bookingRateState.get(ip);
-    if (!current || current.resetAt <= now) {
-      bookingRateState.set(ip, {
-        count: 1,
-        resetAt: now + bookingRateLimitWindowMs,
-      });
-      return next();
-    }
-
-    current.count += 1;
-    if (current.count <= bookingRateLimitMax) {
-      bookingRateState.set(ip, current);
-      return next();
-    }
-
-    res.setHeader(
-      'Retry-After',
-      String(Math.ceil((current.resetAt - now) / 1000)),
-    );
-    res.status(429).json({
-      statusCode: 429,
-      error: 'Too Many Requests',
+  const rules: RateLimitRule[] = [
+    {
+      method: 'POST',
+      path: '/booking',
+      windowMs: bookingRateLimitWindowMs,
+      max: bookingRateLimitMax,
+      keyPrefix: 'rl:booking',
       message: 'Too many booking requests. Please try again later.',
-      requestId,
+    },
+    {
+      method: 'POST',
+      path: '/auth/login',
+      windowMs: authRateLimitWindowMs,
+      max: authRateLimitMax,
+      keyPrefix: 'rl:auth_login',
+      message: 'Too many login attempts. Please try again later.',
+    },
+  ].filter((r) => Number.isFinite(r.windowMs) && r.windowMs > 0 && r.max > 0);
+
+  const redisUrl =
+    typeof process.env.REDIS_URL === 'string'
+      ? process.env.REDIS_URL.trim()
+      : '';
+  const shouldUseRedisRateLimit = rules.length > 0;
+
+  if (isProd && shouldUseRedisRateLimit && !redisUrl) {
+    bootstrapLogger.error(
+      JSON.stringify({ event: 'config.missing_redis_url' }),
+    );
+    process.exit(1);
+  }
+
+  if (redisUrl && shouldUseRedisRateLimit) {
+    const redis = createClient({ url: redisUrl });
+    redis.on('error', (err) => {
+      bootstrapLogger.error(JSON.stringify({ event: 'redis.error' }));
+      void err;
     });
-  });
+    await redis.connect();
+
+    const middleware = createRedisRateLimitMiddleware({
+      client: redis,
+      rules,
+      onError: (err) => {
+        bootstrapLogger.error(
+          JSON.stringify({ event: 'rate_limit.redis_error' }),
+        );
+        void err;
+      },
+    });
+    app.use(middleware);
+
+    const shutdown = async () => {
+      try {
+        await redis.quit();
+      } catch {
+        await redis.disconnect();
+      }
+    };
+    process.on('SIGINT', () => {
+      void shutdown();
+    });
+    process.on('SIGTERM', () => {
+      void shutdown();
+    });
+  }
 
   const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:4200';
 
@@ -341,6 +365,63 @@ async function bootstrap() {
   );
 
   app.useGlobalInterceptors(new RequestLoggingInterceptor());
+
+  const ensureIndexesRaw =
+    typeof process.env.MONGO_ENSURE_INDEXES_ON_STARTUP === 'string'
+      ? process.env.MONGO_ENSURE_INDEXES_ON_STARTUP
+      : '';
+  const ensureIndexesTrimmed = ensureIndexesRaw.trim().toLowerCase();
+  const ensureIndexesEnabled =
+    ensureIndexesTrimmed === 'true' ||
+    (isProd && ensureIndexesTrimmed !== 'false');
+
+  if (ensureIndexesEnabled) {
+    const modelNames = ['Booking', 'DiscountUsed', 'Payment'];
+    try {
+      const asPromise =
+        typeof (mongoose.connection as unknown as { asPromise?: unknown })
+          .asPromise === 'function'
+          ? (
+              mongoose.connection as unknown as {
+                asPromise: () => Promise<unknown>;
+              }
+            ).asPromise
+          : null;
+      if (asPromise) {
+        await asPromise();
+      }
+
+      const results = await Promise.allSettled(
+        modelNames.map(async (name) => {
+          const model = mongoose.models[name];
+          if (!model) return { name, action: 'skipped' as const };
+          await model.createIndexes();
+          return { name, action: 'ok' as const };
+        }),
+      );
+
+      bootstrapLogger.log(
+        JSON.stringify({
+          event: 'mongo.indexes_ensured',
+          results: results.map((r) =>
+            r.status === 'fulfilled'
+              ? r.value
+              : { action: 'failed', reason: 'rejected' },
+          ),
+        }),
+      );
+
+      if (isProd && results.some((r) => r.status === 'rejected')) {
+        process.exit(1);
+      }
+    } catch (error) {
+      bootstrapLogger.error(JSON.stringify({ event: 'mongo.indexes_failed' }));
+      void error;
+      if (isProd) {
+        process.exit(1);
+      }
+    }
+  }
 
   await app.listen(process.env.PORT ?? 3000);
 }
