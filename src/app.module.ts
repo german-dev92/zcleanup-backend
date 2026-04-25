@@ -12,10 +12,10 @@ import { EmployeesModule } from './employees/employees.module';
     MongooseModule.forRoot(process.env.MONGO_URI!, {
       autoIndex:
         process.env.MONGO_AUTO_INDEX === 'true' ||
-        process.env.NODE_ENV === 'production',
+        process.env.NODE_ENV !== 'production',
       autoCreate:
         process.env.MONGO_AUTO_CREATE === 'true' ||
-        process.env.NODE_ENV === 'production',
+        process.env.NODE_ENV !== 'production',
     }),
     EventEmitterModule.forRoot(),
     AuthModule,
