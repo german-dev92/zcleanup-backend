@@ -447,9 +447,8 @@ async function bootstrap() {
       ? process.env.MONGO_ENSURE_INDEXES_ON_STARTUP
       : '';
   const ensureIndexesTrimmed = ensureIndexesRaw.trim().toLowerCase();
-  const ensureIndexesEnabled =
-    ensureIndexesTrimmed === 'true' ||
-    (isProd && ensureIndexesTrimmed !== 'false');
+  const ensureIndexesRequested = ensureIndexesTrimmed === 'true';
+  const ensureIndexesEnabled = ensureIndexesRequested || !isProd;
 
   if (ensureIndexesEnabled) {
     const modelNames = ['Booking', 'DiscountUsed', 'Payment'];
@@ -487,13 +486,20 @@ async function bootstrap() {
         }),
       );
 
-      if (isProd && results.some((r) => r.status === 'rejected')) {
+      if (
+        ensureIndexesRequested &&
+        results.some((r) => r.status === 'rejected')
+      ) {
         process.exit(1);
       }
     } catch (error) {
-      bootstrapLogger.error(JSON.stringify({ event: 'mongo.indexes_failed' }));
-      void error;
-      if (isProd) {
+      bootstrapLogger.error(
+        JSON.stringify({
+          event: 'mongo.indexes_failed',
+          error: toSafeErrorLog(error),
+        }),
+      );
+      if (ensureIndexesRequested) {
         process.exit(1);
       }
     }
