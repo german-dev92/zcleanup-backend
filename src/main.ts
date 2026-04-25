@@ -177,8 +177,27 @@ function validateEnvForStartup(): void {
     );
     process.exit(1);
   }
-  requireEnv('STRIPE_SECRET_KEY');
-  requireEnv('STRIPE_WEBHOOK_SECRET');
+  const stripeSecretKey = requireEnv('STRIPE_SECRET_KEY');
+  const stripeWebhookSecret = requireEnv('STRIPE_WEBHOOK_SECRET');
+  if (!stripeSecretKey.startsWith('sk_')) {
+    new Logger('bootstrap').error(
+      JSON.stringify({ event: 'config.invalid_stripe_secret_key_format' }),
+    );
+    process.exit(1);
+  }
+  if (!stripeWebhookSecret.startsWith('whsec_')) {
+    new Logger('bootstrap').error(
+      JSON.stringify({ event: 'config.invalid_stripe_webhook_secret_format' }),
+    );
+    process.exit(1);
+  }
+  const trustProxyEnv =
+    typeof process.env.TRUST_PROXY === 'string' ? process.env.TRUST_PROXY : '';
+  if (!trustProxyEnv.trim()) {
+    new Logger('bootstrap').warn(
+      JSON.stringify({ event: 'config.trust_proxy_unset' }),
+    );
+  }
   requireEnv('EMAIL_USER');
   requireEnv('EMAIL_PASS');
 }
@@ -320,11 +339,32 @@ async function bootstrap() {
 
   const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:4200';
 
-  const allowedOrigins = frontendUrl
+  const normalizeOriginValue = (value: string): string => {
+    const trimmed = String(value ?? '')
+      .trim()
+      .replace(/^['"`]+|['"`]+$/g, '');
+    if (!trimmed) return '';
+    try {
+      return new URL(trimmed).origin.toLowerCase();
+    } catch {
+      return trimmed.replace(/\/$/, '').toLowerCase();
+    }
+  };
+
+  const baseAllowedOrigins = frontendUrl
     .split(',')
-    .map((v) => v.trim())
-    .filter(Boolean)
-    .map((v) => v.replace(/\/$/, ''));
+    .map((v) => normalizeOriginValue(v))
+    .filter(Boolean);
+
+  const allowedOrigins = isProd
+    ? Array.from(new Set(baseAllowedOrigins))
+    : Array.from(
+        new Set([
+          ...baseAllowedOrigins,
+          'http://localhost:4200',
+          'http://127.0.0.1:4200',
+        ]),
+      );
 
   app.enableCors({
     origin: (
@@ -333,7 +373,7 @@ async function bootstrap() {
     ) => {
       if (!origin) return callback(null, true);
 
-      const normalizedOrigin = origin.replace(/\/$/, '');
+      const normalizedOrigin = normalizeOriginValue(origin);
 
       if (allowedOrigins.includes(normalizedOrigin)) {
         return callback(null, true);

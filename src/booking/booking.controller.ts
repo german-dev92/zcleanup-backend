@@ -244,9 +244,13 @@ export class BookingController {
     @Param('id') id: string,
     @Body() body: UpdateBookingStatusDto,
   ) {
-    this.logger.log('PATCH /booking/:id/status');
-    this.logger.log(`ID: ${id}`);
-    this.logger.log(`BODY: ${JSON.stringify(body)}`);
+    this.logger.log(
+      JSON.stringify({
+        event: 'booking.status_update',
+        bookingId: id,
+        status: body.status,
+      }),
+    );
 
     const booking = await this.bookingService.updateStatus(id, body.status);
     return {

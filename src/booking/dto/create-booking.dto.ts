@@ -9,6 +9,7 @@ import {
   IsArray,
   IsNumber,
   IsInt,
+  MaxLength,
   Min,
   IsObject,
   registerDecorator,
@@ -135,17 +136,21 @@ export class CreateBookingDto {
 
   @IsNotEmpty()
   @IsString()
+  @MaxLength(120)
   name: string;
 
   @IsEmail()
+  @MaxLength(254)
   email: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(30)
   phone?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(300)
   address?: string;
 
   // ======================
@@ -154,22 +159,27 @@ export class CreateBookingDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(60)
   serviceType?: string;
 
   @IsNotEmpty()
   @IsString()
+  @MaxLength(60)
   cleaningType: string;
 
   @IsNotEmpty()
   @IsString()
+  @MaxLength(20)
   desiredDate: string;
 
   @IsNotEmpty()
   @IsString()
+  @MaxLength(20)
   desiredTime: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(40)
   frequency?: string;
 
   // ======================
@@ -216,6 +226,7 @@ export class CreateBookingDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(40)
   moveMode?: string;
 
   @IsOptional()
