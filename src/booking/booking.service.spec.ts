@@ -7,6 +7,7 @@ import { DiscountsService } from '../discounts/discounts.service';
 import { StripeService } from '../payments/stripe.service';
 import { Payment } from '../payments/schemas/payment.schema';
 import { BookingStateService } from './booking-state.service';
+import { EmployeesService } from '../employees/employees.service';
 
 describe('BookingService', () => {
   let service: BookingService;
@@ -35,6 +36,10 @@ describe('BookingService', () => {
         {
           provide: StripeService,
           useValue: { createCheckoutSession: jest.fn() },
+        },
+        {
+          provide: EmployeesService,
+          useValue: {},
         },
       ],
     }).compile();

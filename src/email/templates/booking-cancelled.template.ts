@@ -63,6 +63,83 @@ export function buildBookingCancelledTemplate(
       `
       : '';
 
+  const buildKeyValueRows = (rows: Array<{ label: string; value: string }>) =>
+    rows
+      .map(
+        (row) => `
+          <tr>
+            <td width="40%" style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #6b7280;">${row.label}</td>
+            <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827; font-weight: 700;">${row.value}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+  const bookingSummaryRows = buildKeyValueRows([
+    { label: 'Customer', value: model.customerName },
+    { label: 'Email', value: model.customerEmail },
+    { label: 'Phone', value: model.customerPhone },
+    { label: 'Address', value: model.address },
+    { label: 'Service', value: model.cleaningType },
+    { label: 'Date', value: model.desiredDate },
+    { label: 'Time', value: model.desiredTime },
+    { label: 'Frequency', value: model.frequency },
+  ]);
+
+  const propertyRows = model.propertyRows?.length
+    ? buildKeyValueRows(model.propertyRows)
+    : buildKeyValueRows([{ label: 'Property', value: 'N/A' }]);
+
+  const extrasList = Array.isArray(model.extrasList) ? model.extrasList : [];
+  const extrasHtml =
+    extrasList.length > 0
+      ? `<ul style="margin: 8px 0 0; padding: 0 0 0 18px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827;">
+          ${extrasList.map((x) => `<li style="margin: 4px 0;">${x}</li>`).join('')}
+        </ul>`
+      : `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #6b7280;">None</div>`;
+
+  const conditionsList = Array.isArray(model.specialConditions)
+    ? model.specialConditions
+    : [];
+  const conditionsHtml =
+    conditionsList.length > 0
+      ? `<ul style="margin: 8px 0 0; padding: 0 0 0 18px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827;">
+          ${conditionsList.map((x) => `<li style="margin: 4px 0;">${x}</li>`).join('')}
+        </ul>`
+      : `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #6b7280;">None</div>`;
+
+  const notesText =
+    typeof model.customerNotes === 'string' ? model.customerNotes : '';
+  const customerNotesHtml =
+    notesText.trim().length > 0
+      ? `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827; white-space: pre-wrap; line-height: 1.5;">${notesText}</div>`
+      : `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #6b7280;">None</div>`;
+
+  const pricingRows = Array.isArray(model.pricingRows) ? model.pricingRows : [];
+  const pricingRowsHtml =
+    pricingRows.length > 0
+      ? pricingRows
+          .map((row) => {
+            const border = row.isTotal ? '0' : '1px solid #eef2f7';
+            const color = row.isTotal ? '#111827' : '#334155';
+            const weight = row.isTotal ? '900' : '700';
+            const size = row.isTotal ? '16px' : '13px';
+            const padTop = row.isTotal ? '12px' : '10px';
+            return `
+              <tr>
+                <td style="padding: ${padTop} 0; border-top: ${border}; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #64748b;">${row.label}</td>
+                <td align="right" style="padding: ${padTop} 0; border-top: ${border}; font-family: Arial, Helvetica, sans-serif; font-size: ${size}; font-weight: ${weight}; color: ${color};">${row.value}</td>
+              </tr>
+            `;
+          })
+          .join('')
+      : `
+        <tr>
+          <td style="padding: 10px 0; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #64748b;">Total</td>
+          <td align="right" style="padding: 10px 0; font-family: Arial, Helvetica, sans-serif; font-size: 16px; font-weight: 900; color: #111827;">-</td>
+        </tr>
+      `;
+
   return `
   <html lang="en">
     <head>
@@ -121,37 +198,14 @@ export function buildBookingCancelledTemplate(
                           <tr>
                             <td style="padding: 18px 0 0;">
                               <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
-                                Booking details
+                                Booking Summary
                               </div>
                             </td>
                           </tr>
                           <tr>
                             <td style="padding: 10px 0 2px;">
                               <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-                                <tr>
-                                  <td width="40%" style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #888888;">Customer</td>
-                                  <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333333; font-weight: 700;">${model.customerName}</td>
-                                </tr>
-                                <tr>
-                                  <td width="40%" style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #888888;">Address</td>
-                                  <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333333; font-weight: 700;">${model.address}</td>
-                                </tr>
-                                <tr>
-                                  <td width="40%" style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #888888;">Service</td>
-                                  <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333333; font-weight: 700;">${model.cleaningType}</td>
-                                </tr>
-                                <tr>
-                                  <td width="40%" style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #888888;">Date</td>
-                                  <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333333; font-weight: 700;">${model.desiredDate}</td>
-                                </tr>
-                                <tr>
-                                  <td width="40%" style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #888888;">Time</td>
-                                  <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333333; font-weight: 700;">${model.desiredTime}</td>
-                                </tr>
-                                <tr>
-                                  <td width="40%" style="padding: 12px 0; font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #888888;">Frequency</td>
-                                  <td style="padding: 12px 0; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333333; font-weight: 700;">${model.frequency}</td>
-                                </tr>
+                                ${bookingSummaryRows}
                               </table>
                             </td>
                           </tr>
@@ -163,25 +217,66 @@ export function buildBookingCancelledTemplate(
                       <td style="padding: 0 24px;">
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
                           <tr>
+                            <td style="padding: 18px 0 8px;">
+                              <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
+                                Property Details
+                              </div>
+                              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top: 8px;">
+                                ${propertyRows}
+                              </table>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+
+                    <tr>
+                      <td style="padding: 0 24px;">
+                        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
+                          <tr>
+                            <td style="padding: 18px 0 8px;">
+                              <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
+                                Selected Extras
+                              </div>
+                              ${extrasHtml}
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+
+                    <tr>
+                      <td style="padding: 0 24px;">
+                        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
+                          <tr>
+                            <td style="padding: 18px 0 8px;">
+                              <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
+                                Customer Notes
+                              </div>
+                              ${customerNotesHtml}
+                              <div style="margin-top: 14px; font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
+                                Special Conditions
+                              </div>
+                              ${conditionsHtml}
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+
+                    <tr>
+                      <td style="padding: 0 24px;">
+                        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
+                          <tr>
                             <td style="padding: 16px 0 22px;">
-                              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                              <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
+                                Pricing Breakdown
+                              </div>
+                              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background: #f8fafc; border-radius: 8px; margin-top: 10px;">
                                 <tr>
-                                  <td colspan="2" style="padding: 0;">
-                                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background: #f8f9fa; border-radius: 8px;">
-                                      <tr>
-                                        <td style="padding: 16px;">
-                                          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-                                            <tr>
-                                              <td style="font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #888888;">Final price</td>
-                                              <td align="right" style="font-family: Arial, Helvetica, sans-serif; font-size: 22px; font-weight: 900; color: #e67e22;">$${model.finalPrice}</td>
-                                            </tr>
-                                            <tr>
-                                              <td style="font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #9ca3af; padding-top: 8px;">Estimated</td>
-                                              <td align="right" style="font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #9ca3af; padding-top: 8px;">$${model.estimatedPrice}</td>
-                                            </tr>
-                                          </table>
-                                        </td>
-                                      </tr>
+                                  <td style="padding: 14px 16px;">
+                                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                                      ${pricingRowsHtml}
                                     </table>
                                   </td>
                                 </tr>

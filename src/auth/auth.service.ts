@@ -5,9 +5,10 @@ import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { User, UserDocument } from '../users/schemas/user.schema';
 import type { AuthRole } from './auth.types';
+import { UserRole } from './roles.enum';
 
 type JwtPayload = {
-  userId: string;
+  sub: string;
   email: string;
   role: AuthRole;
 };
@@ -38,7 +39,7 @@ export class AuthService {
 
     const user = await this.users.findOne({ email });
 
-    if (!user) {
+    if (!user || user.active === false) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -57,9 +58,9 @@ export class AuthService {
     }
 
     const payload: JwtPayload = {
-      userId: String(user._id),
+      sub: String(user._id),
       email: user.email,
-      role: user.role,
+      role: this.coerceRole((user as unknown as { role?: unknown }).role),
     };
 
     const access_token = await this.jwtService.signAsync(payload);
@@ -69,8 +70,14 @@ export class AuthService {
       user: {
         id: String(user._id),
         email: user.email,
-        role: user.role,
+        role: this.coerceRole((user as unknown as { role?: unknown }).role),
       },
     };
+  }
+
+  private coerceRole(value: unknown): AuthRole {
+    if (value === UserRole.ADMIN) return UserRole.ADMIN;
+    if (value === UserRole.SUPERVISOR) return UserRole.SUPERVISOR;
+    return UserRole.EMPLOYEE;
   }
 }

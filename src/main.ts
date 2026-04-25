@@ -7,6 +7,7 @@ import {
   CallHandler,
   ExecutionContext,
   Injectable,
+  BadRequestException,
   Logger,
   NestInterceptor,
   ValidationPipe,
@@ -15,8 +16,36 @@ import type { NextFunction, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { Observable, throwError } from 'rxjs';
 import { catchError, tap } from 'rxjs/operators';
+import type { ValidationError } from 'class-validator';
 
 type RequestWithId = Request & { requestId?: string };
+
+type SanitizedValidationError = {
+  property: string;
+  constraints?: string[];
+  children?: SanitizedValidationError[];
+};
+
+function sanitizeValidationErrors(
+  errors: ValidationError[],
+): SanitizedValidationError[] {
+  return errors
+    .map((e) => {
+      const constraints = e.constraints
+        ? Object.keys(e.constraints)
+        : undefined;
+      const children =
+        Array.isArray(e.children) && e.children.length > 0
+          ? sanitizeValidationErrors(e.children)
+          : undefined;
+
+      const out: SanitizedValidationError = { property: e.property };
+      if (constraints && constraints.length > 0) out.constraints = constraints;
+      if (children && children.length > 0) out.children = children;
+      return out;
+    })
+    .filter((x) => x.property || x.constraints || x.children);
+}
 
 @Injectable()
 class RequestLoggingInterceptor implements NestInterceptor {
@@ -39,6 +68,24 @@ class RequestLoggingInterceptor implements NestInterceptor {
         const statusCode =
           typeof res?.statusCode === 'number' ? res.statusCode : 0;
         const durationMs = Date.now() - start;
+
+        const isProd = process.env.NODE_ENV === 'production';
+        const userValue = (req as unknown as { user?: unknown }).user;
+        const actorSub =
+          !isProd &&
+          typeof userValue === 'object' &&
+          userValue !== null &&
+          typeof (userValue as { sub?: unknown }).sub === 'string'
+            ? String((userValue as { sub?: unknown }).sub)
+            : undefined;
+        const actorRole =
+          !isProd &&
+          typeof userValue === 'object' &&
+          userValue !== null &&
+          typeof (userValue as { role?: unknown }).role === 'string'
+            ? String((userValue as { role?: unknown }).role)
+            : undefined;
+
         this.logger.log(
           JSON.stringify({
             requestId,
@@ -46,6 +93,8 @@ class RequestLoggingInterceptor implements NestInterceptor {
             url,
             statusCode,
             durationMs,
+            actorSub,
+            actorRole,
           }),
         );
       }),
@@ -57,6 +106,24 @@ class RequestLoggingInterceptor implements NestInterceptor {
               ? res.statusCode
               : 500;
         const durationMs = Date.now() - start;
+
+        const isProd = process.env.NODE_ENV === 'production';
+        const userValue = (req as unknown as { user?: unknown }).user;
+        const actorSub =
+          !isProd &&
+          typeof userValue === 'object' &&
+          userValue !== null &&
+          typeof (userValue as { sub?: unknown }).sub === 'string'
+            ? String((userValue as { sub?: unknown }).sub)
+            : undefined;
+        const actorRole =
+          !isProd &&
+          typeof userValue === 'object' &&
+          userValue !== null &&
+          typeof (userValue as { role?: unknown }).role === 'string'
+            ? String((userValue as { role?: unknown }).role)
+            : undefined;
+
         this.logger.error(
           JSON.stringify({
             requestId,
@@ -64,6 +131,8 @@ class RequestLoggingInterceptor implements NestInterceptor {
             url,
             statusCode,
             durationMs,
+            actorSub,
+            actorRole,
           }),
         );
 
@@ -100,6 +169,7 @@ function validateEnvForStartup(): void {
     new Logger('bootstrap').error(
       JSON.stringify({ event: 'config.missing_jwt_secret' }),
     );
+    process.exit(1);
   }
   requireEnv('STRIPE_SECRET_KEY');
   requireEnv('STRIPE_WEBHOOK_SECRET');
@@ -148,6 +218,82 @@ async function bootstrap() {
     next();
   });
 
+  const bookingRateLimitWindowMs = Number(
+    process.env.BOOKING_RATE_WINDOW_MS ?? 60_000,
+  );
+  const bookingRateLimitMax = Number(process.env.BOOKING_RATE_MAX ?? 20);
+  const bookingRateLimitEnabled =
+    bookingRateLimitWindowMs > 0 && bookingRateLimitMax > 0;
+  const bookingRateState = new Map<
+    string,
+    { count: number; resetAt: number }
+  >();
+
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!bookingRateLimitEnabled) return next();
+    if (req.method !== 'POST') return next();
+    const path = typeof req.path === 'string' ? req.path : '';
+    if (path !== '/booking') return next();
+
+    const requestId =
+      typeof (req as RequestWithId).requestId === 'string' &&
+      (req as RequestWithId).requestId?.trim()
+        ? (req as RequestWithId).requestId
+        : undefined;
+
+    const forwardedFor = req.headers['x-forwarded-for'];
+    const rawForwarded =
+      typeof forwardedFor === 'string'
+        ? forwardedFor
+        : Array.isArray(forwardedFor)
+          ? forwardedFor.join(',')
+          : '';
+    const forwardedIp = rawForwarded.split(',')[0]?.trim();
+    const socketInfo = req.socket as unknown as { remoteAddress?: unknown };
+    const socketRemoteAddress =
+      typeof socketInfo?.remoteAddress === 'string'
+        ? socketInfo.remoteAddress
+        : undefined;
+    const ip = forwardedIp || req.ip || socketRemoteAddress || 'unknown';
+
+    const now = Date.now();
+    if (bookingRateState.size > 20000) {
+      let scanned = 0;
+      for (const [key, value] of bookingRateState) {
+        if (value.resetAt <= now) {
+          bookingRateState.delete(key);
+        }
+        scanned += 1;
+        if (scanned >= 500) break;
+      }
+    }
+    const current = bookingRateState.get(ip);
+    if (!current || current.resetAt <= now) {
+      bookingRateState.set(ip, {
+        count: 1,
+        resetAt: now + bookingRateLimitWindowMs,
+      });
+      return next();
+    }
+
+    current.count += 1;
+    if (current.count <= bookingRateLimitMax) {
+      bookingRateState.set(ip, current);
+      return next();
+    }
+
+    res.setHeader(
+      'Retry-After',
+      String(Math.ceil((current.resetAt - now) / 1000)),
+    );
+    res.status(429).json({
+      statusCode: 429,
+      error: 'Too Many Requests',
+      message: 'Too many booking requests. Please try again later.',
+      requestId,
+    });
+  });
+
   const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:4200';
 
   const allowedOrigins = frontendUrl
@@ -185,6 +331,12 @@ async function bootstrap() {
       whitelist: true,
       forbidNonWhitelisted: true,
       transform: true,
+      exceptionFactory: (errors: ValidationError[]) => {
+        return new BadRequestException({
+          message: 'Validation failed',
+          errors: sanitizeValidationErrors(errors),
+        });
+      },
     }),
   );
 

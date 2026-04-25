@@ -4,8 +4,7 @@ dotenv.config();
 import mongoose from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { UserSchema } from './users/schemas/user.schema';
-
-type UserRole = 'admin' | 'user';
+import { UserRole } from './auth/roles.enum';
 
 type UserDoc = {
   email: string;
@@ -67,7 +66,7 @@ async function run(): Promise<void> {
       .select({ _id: 1, email: 1, role: 1 })
       .lean<UserRecord>();
 
-    if (existingUser && existingUser.role === 'admin') {
+    if (existingUser && existingUser.role === UserRole.ADMIN) {
       process.stdout.write(
         `${JSON.stringify({
           ok: true,
@@ -82,7 +81,7 @@ async function run(): Promise<void> {
     if (existingUser) {
       await UserModel.updateOne(
         { _id: existingUser._id },
-        { $set: { role: 'admin', passwordHash } },
+        { $set: { role: UserRole.ADMIN, passwordHash } },
       );
       process.stdout.write(
         `${JSON.stringify({
@@ -97,7 +96,7 @@ async function run(): Promise<void> {
     await UserModel.create({
       email,
       passwordHash,
-      role: 'admin',
+      role: UserRole.ADMIN,
     });
 
     process.stdout.write(

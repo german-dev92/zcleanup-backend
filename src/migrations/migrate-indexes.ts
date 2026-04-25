@@ -4,6 +4,7 @@ dotenv.config();
 import mongoose from 'mongoose';
 import { PaymentSchema } from '../payments/schemas/payment.schema';
 import { DiscountUsedSchema } from '../discounts/schemas/discount-used.schema';
+import { BookingSchema } from '../booking/schemas/booking.schema';
 
 type IndexResult = {
   collection: string;
@@ -24,6 +25,8 @@ export async function migrateIndexes(): Promise<IndexResult[]> {
   const DiscountUsedModel =
     mongoose.models.DiscountUsed ??
     mongoose.model('DiscountUsed', DiscountUsedSchema);
+  const BookingModel =
+    mongoose.models.Booking ?? mongoose.model('Booking', BookingSchema);
 
   const results: IndexResult[] = [];
 
@@ -48,6 +51,34 @@ export async function migrateIndexes(): Promise<IndexResult[]> {
       })),
     );
 
+    results.push(
+      ...(await ensureIndex({
+        model: BookingModel,
+        collection: 'bookings',
+        keys: { status: 1, createdAt: -1 },
+        indexName: 'status_1_createdAt_-1',
+        options: {},
+      })),
+    );
+    results.push(
+      ...(await ensureIndex({
+        model: BookingModel,
+        collection: 'bookings',
+        keys: { email: 1, createdAt: -1 },
+        indexName: 'email_1_createdAt_-1',
+        options: {},
+      })),
+    );
+    results.push(
+      ...(await ensureIndex({
+        model: BookingModel,
+        collection: 'bookings',
+        keys: { createdAt: -1 },
+        indexName: 'createdAt_-1',
+        options: {},
+      })),
+    );
+
     return results;
   } finally {
     await mongoose.disconnect();
@@ -67,6 +98,47 @@ async function ensureUniqueIndex(params: {
     const indexes = await model.collection.indexes();
     const exists = indexes.some((index) => {
       if (index?.unique !== true) return false;
+      const key = index?.key as Record<string, unknown> | undefined;
+      if (!key) return false;
+      return Object.entries(keys).every(([k, v]) => key[k] === v);
+    });
+
+    if (exists) {
+      return [{ collection, index: indexName, action: 'exists' as const }];
+    }
+
+    await model.collection.createIndex(keys, options);
+    return [{ collection, index: indexName, action: 'created' as const }];
+  } catch (error) {
+    const message =
+      typeof error === 'object' && error !== null && 'message' in error
+        ? String((error as { message?: unknown }).message)
+        : 'unknown';
+    process.stderr.write(
+      `${JSON.stringify({
+        level: 'warn',
+        event: 'migrate.index_failed',
+        collection,
+        index: indexName,
+        message,
+      })}\n`,
+    );
+    return [{ collection, index: indexName, action: 'failed' as const }];
+  }
+}
+
+async function ensureIndex(params: {
+  model: mongoose.Model<any>;
+  collection: string;
+  keys: Record<string, 1 | -1>;
+  indexName: string;
+  options: Record<string, unknown>;
+}): Promise<IndexResult[]> {
+  const { model, collection, keys, indexName, options } = params;
+
+  try {
+    const indexes = await model.collection.indexes();
+    const exists = indexes.some((index) => {
       const key = index?.key as Record<string, unknown> | undefined;
       if (!key) return false;
       return Object.entries(keys).every(([k, v]) => key[k] === v);

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import type { AuthRole, AuthUser } from './auth.types';
 import { ROLES_KEY } from './roles.decorator';
+import { UserRole } from './roles.enum';
 
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -49,6 +50,10 @@ export class RolesGuard implements CanActivate {
       return false;
     }
     const role = value['role'];
-    return role === 'admin' || role === 'user';
+    return (
+      role === UserRole.ADMIN ||
+      role === UserRole.SUPERVISOR ||
+      role === UserRole.EMPLOYEE
+    );
   }
 }

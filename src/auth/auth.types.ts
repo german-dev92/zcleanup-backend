@@ -1,4 +1,6 @@
-export type AuthRole = 'admin' | 'user';
+import type { UserRole } from './roles.enum';
+
+export type AuthRole = UserRole;
 
 export type AuthUser = {
   sub?: string;

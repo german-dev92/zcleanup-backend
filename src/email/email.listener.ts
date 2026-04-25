@@ -44,7 +44,11 @@ export class EmailListener {
         return;
       }
 
-      this.logger.log(`[EMAIL] Processing ${eventType} → ${booking.email}`);
+      const bookingId =
+        typeof (booking as { bookingId?: unknown }).bookingId === 'string'
+          ? String((booking as { bookingId?: unknown }).bookingId)
+          : 'unknown';
+      this.logger.log(`[EMAIL] Processing ${eventType} → ${bookingId}`);
 
       const contractAttachment = this.getContractAttachment(eventType);
 
@@ -54,7 +58,9 @@ export class EmailListener {
         contractAttachment,
       });
 
-      this.logger.log(`[EMAIL] Sent successfully → ${eventType}`);
+      this.logger.log(
+        `[EMAIL] Sent successfully → ${eventType} → ${bookingId}`,
+      );
     } catch (error) {
       this.logger.error(
         `[EMAIL] Failed event ${eventType}`,

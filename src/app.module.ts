@@ -5,6 +5,7 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { DiscountsModule } from './discounts/discounts.module';
 import { PaymentsModule } from './payments/payments.module';
 import { AuthModule } from './auth/auth.module';
+import { EmployeesModule } from './employees/employees.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { AuthModule } from './auth/auth.module';
     }),
     EventEmitterModule.forRoot(),
     AuthModule,
+    EmployeesModule,
     BookingModule,
     DiscountsModule,
     PaymentsModule,

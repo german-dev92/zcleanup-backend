@@ -1,8 +1,19 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import { BOOKING_STATUSES, type BookingStatus } from '../types/booking-status';
 
 export type BookingDocument = Booking & Document;
+
+type AssignedBookingEmployee = {
+  employeeId: Types.ObjectId;
+  name: string;
+  role: string;
+};
+
+type AssignedBookingSupervisor = {
+  employeeId: Types.ObjectId;
+  name: string;
+};
 
 @Schema({ timestamps: true })
 export class Booking {
@@ -41,12 +52,52 @@ export class Booking {
   @Prop({ type: String, enum: BOOKING_STATUSES, default: 'pending' })
   status: BookingStatus;
 
+  @Prop({ type: Types.ObjectId, ref: 'Employee', required: false })
+  assignedEmployeeId?: Types.ObjectId;
+
+  @Prop({ required: false, lowercase: true, trim: true })
+  assignedEmployeeEmail?: string;
+
+  @Prop({ required: false, trim: true })
+  assignedEmployeeName?: string;
+
+  @Prop({
+    type: [
+      {
+        employeeId: { type: Types.ObjectId, ref: 'Employee', required: true },
+        name: { type: String, default: '' },
+        role: { type: String, default: '' },
+      },
+    ],
+    default: [],
+    required: false,
+  })
+  assignedEmployees?: AssignedBookingEmployee[];
+
+  @Prop({
+    type: {
+      employeeId: { type: Types.ObjectId, ref: 'Employee', required: true },
+      name: { type: String, default: '' },
+    },
+    required: false,
+  })
+  assignedSupervisor?: AssignedBookingSupervisor;
+
+  @Prop({ type: Date, required: false })
+  assignedAt?: Date;
+
+  @Prop({ type: Date, required: false })
+  startedAt?: Date;
+
+  @Prop({ type: Date, required: false })
+  completedAt?: Date;
+
   // 🟡 NEGOCIO
   @Prop({ required: false })
   frequency?: string;
 
-  @Prop({ type: [String], default: [] })
-  extras?: string[];
+  @Prop({ type: [MongooseSchema.Types.Mixed], default: [] })
+  extras?: unknown[];
 
   // 💰 PRICING SNAPSHOT
   @Prop({ type: Number, required: false })
@@ -58,9 +109,19 @@ export class Booking {
   @Prop({ required: false })
   paymentUrl?: string;
 
+  @Prop({ type: String, enum: ['pending', 'paid'], default: 'pending' })
+  paymentStatus: 'pending' | 'paid';
+
+  @Prop({ type: Date, required: false })
+  paidAt?: Date;
+
   // 🔵 DINÁMICO (CLAVE DEL SISTEMA)
   @Prop({ type: Object, required: false })
   dynamicFields?: Record<string, any>;
 }
 
 export const BookingSchema = SchemaFactory.createForClass(Booking);
+
+BookingSchema.index({ status: 1, createdAt: -1 });
+BookingSchema.index({ email: 1, createdAt: -1 });
+BookingSchema.index({ createdAt: -1 });

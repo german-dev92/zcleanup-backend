@@ -14,6 +14,7 @@ import {
 import { Payment, type PaymentDocument } from './schemas/payment.schema';
 import { StripeService } from './stripe.service';
 import type { AuthUser } from '../auth/auth.types';
+import { UserRole } from '../auth/roles.enum';
 
 @Injectable()
 export class PaymentsService {
@@ -46,7 +47,11 @@ export class PaymentsService {
       throw new BadRequestException('Cannot pay for a cancelled booking');
     }
 
-    if (actor.role !== 'admin') {
+    if (booking.paymentStatus === 'paid' || booking.status === 'paid') {
+      throw new BadRequestException('Booking is already paid');
+    }
+
+    if (actor.role !== UserRole.ADMIN) {
       const actorEmail = typeof actor.email === 'string' ? actor.email : '';
       const bookingEmail =
         typeof booking.email === 'string' ? booking.email : '';

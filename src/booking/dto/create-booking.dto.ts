@@ -8,8 +8,9 @@ import {
   IsBoolean,
   IsArray,
   IsNumber,
+  IsInt,
+  Min,
   IsObject,
-  MaxLength,
   registerDecorator,
   type ValidationArguments,
   type ValidationOptions,
@@ -68,6 +69,65 @@ function MaxRecordValueLength(
   };
 }
 
+function IsExtrasArray(validationOptions?: ValidationOptions) {
+  return (object: object, propertyName: string) => {
+    registerDecorator({
+      name: 'isExtrasArray',
+      target: object.constructor,
+      propertyName,
+      constraints: [],
+      options: validationOptions,
+      validator: {
+        validate(value: unknown) {
+          if (value == null) {
+            return true;
+          }
+          if (!Array.isArray(value)) {
+            return false;
+          }
+
+          for (const item of value) {
+            if (typeof item === 'string') {
+              continue;
+            }
+
+            if (typeof item === 'object' && item !== null) {
+              const typeValue = (item as { type?: unknown }).type;
+              const quantityValue = (item as { quantity?: unknown }).quantity;
+              if (typeof typeValue !== 'string' || !typeValue.trim()) {
+                return false;
+              }
+
+              if (quantityValue == null) {
+                continue;
+              }
+
+              const quantity =
+                typeof quantityValue === 'number'
+                  ? quantityValue
+                  : typeof quantityValue === 'string'
+                    ? Number(quantityValue)
+                    : NaN;
+              if (!Number.isFinite(quantity) || Math.trunc(quantity) <= 0) {
+                return false;
+              }
+
+              continue;
+            }
+
+            return false;
+          }
+
+          return true;
+        },
+        defaultMessage() {
+          return `${propertyName} must be an array of strings or { type, quantity } objects`;
+        },
+      },
+    });
+  };
+}
+
 export class CreateBookingDto {
   // ======================
   // 🔹 CONTACT INFO
@@ -91,6 +151,10 @@ export class CreateBookingDto {
   // ======================
   // 🔹 SERVICE INFO
   // ======================
+
+  @IsOptional()
+  @IsString()
+  serviceType?: string;
 
   @IsNotEmpty()
   @IsString()
@@ -129,6 +193,42 @@ export class CreateBookingDto {
   // ======================
 
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  bedrooms?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  bathrooms?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  additionalBedrooms?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  distanceSurcharge?: boolean;
+
+  @IsOptional()
+  @IsString()
+  moveMode?: string;
+
+  @IsOptional()
+  @IsObject()
+  @MaxRecordValueLength(500)
+  postConstruction?: Record<string, any>;
+
+  @IsOptional()
+  @IsObject()
+  @MaxRecordValueLength(500)
+  windowCleaning?: Record<string, any>;
+
+  @IsOptional()
   @IsObject()
   @MaxRecordValueLength(500)
   dynamicFields?: Record<string, any>;
@@ -136,9 +236,8 @@ export class CreateBookingDto {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(20)
-  @IsString({ each: true })
-  @MaxLength(100, { each: true })
-  extras?: string[];
+  @IsExtrasArray()
+  extras?: any[];
 
   // ======================
   // 🔹 PRICING SNAPSHOT

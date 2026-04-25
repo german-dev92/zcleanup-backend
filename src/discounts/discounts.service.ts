@@ -27,8 +27,13 @@ export class DiscountsService implements OnModuleInit {
   }
 
   hasUsedDiscount(email: string): Promise<boolean> {
-    void email;
-    return Promise.resolve(false);
+    const normalized = String(email ?? '')
+      .toLowerCase()
+      .trim();
+    if (!normalized) return Promise.resolve(false);
+    return this.discountModel
+      .findOne({ email: normalized })
+      .then((existing) => !!existing);
   }
 
   async hasUsedDiscountByNormalizedAddress(

@@ -12,7 +12,6 @@ import {
 } from '../booking/schemas/booking.schema';
 import { Payment, type PaymentDocument } from './schemas/payment.schema';
 import { StripeService } from './stripe.service';
-import { BookingStateService } from '../booking/booking-state.service';
 
 type StripeWebhookEvent = {
   type: string;
@@ -40,7 +39,6 @@ export class PaymentsWebhookService {
     @InjectModel(Payment.name)
     private readonly paymentModel: Model<PaymentDocument>,
     private readonly stripeService: StripeService,
-    private readonly bookingStateService: BookingStateService,
   ) {}
 
   async handleWebhook(payload: Buffer, signature: string): Promise<void> {
@@ -126,7 +124,7 @@ export class PaymentsWebhookService {
       return;
     }
 
-    if (booking.status === 'paid') {
+    if (booking.paymentStatus === 'paid' || booking.status === 'paid') {
       this.logger.debug(
         JSON.stringify({
           event: 'stripe.webhook.booking_ignored',
@@ -138,11 +136,16 @@ export class PaymentsWebhookService {
     }
 
     const current = booking.status;
-    if (current !== 'confirmed') {
+    const eligible =
+      current === 'confirmed' ||
+      current === 'assigned' ||
+      current === 'in_progress' ||
+      current === 'completed';
+    if (!eligible) {
       this.logger.warn(
         JSON.stringify({
           event: 'stripe.webhook.booking_ignored',
-          reason: 'not_confirmed',
+          reason: 'not_eligible_for_payment',
           bookingId,
           current,
         }),
@@ -245,13 +248,10 @@ export class PaymentsWebhookService {
       return;
     }
 
-    const next = this.bookingStateService.transitionBooking({
-      current,
-      next: 'paid',
-      source: 'webhook',
-    });
-
-    booking.status = next;
+    booking.paymentStatus = 'paid';
+    if (!booking.paidAt) {
+      booking.paidAt = new Date();
+    }
     await booking.save();
     this.logger.log(
       JSON.stringify({ event: 'stripe.webhook.booking_paid', bookingId }),

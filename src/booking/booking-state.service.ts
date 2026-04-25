@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import type { BookingStatus } from './types/booking-status';
 
-export type BookingTransitionSource = 'admin' | 'webhook';
+export type BookingTransitionSource = 'admin' | 'employee' | 'webhook';
 
 @Injectable()
 export class BookingStateService {
@@ -13,11 +13,28 @@ export class BookingStateService {
     if (from === to) return true;
 
     if (to === 'cancelled') {
-      return from === 'pending' || from === 'confirmed' || from === 'paid';
+      return (
+        from === 'pending' ||
+        from === 'confirmed' ||
+        from === 'assigned' ||
+        from === 'in_progress' ||
+        from === 'paid'
+      );
     }
 
     if (from === 'pending' && to === 'confirmed') return true;
-    if (from === 'confirmed' && to === 'paid') return true;
+    if (from === 'confirmed' && to === 'assigned') return true;
+    if (from === 'assigned' && to === 'in_progress') return true;
+    if (from === 'in_progress' && to === 'completed') return true;
+
+    if (to === 'paid') {
+      return (
+        from === 'confirmed' ||
+        from === 'assigned' ||
+        from === 'in_progress' ||
+        from === 'completed'
+      );
+    }
 
     return false;
   }
@@ -43,9 +60,25 @@ export class BookingStateService {
       }
     }
 
-    if (current === 'confirmed' && next === 'paid') {
+    if (next === 'paid') {
       if (source !== 'webhook') {
         throw new ForbiddenException('Only webhook can mark bookings as paid');
+      }
+    }
+
+    if (next === 'assigned') {
+      if (source !== 'admin') {
+        throw new ForbiddenException(
+          'Only admin can update operational status',
+        );
+      }
+    }
+
+    if (next === 'in_progress' || next === 'completed') {
+      if (source !== 'admin' && source !== 'employee') {
+        throw new ForbiddenException(
+          'Only admin/employee can update operational status',
+        );
       }
     }
 
