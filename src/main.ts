@@ -160,6 +160,32 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function toSafeErrorLog(value: unknown): {
+  name?: string;
+  message?: string;
+  code?: string;
+} {
+  if (value instanceof Error) {
+    const anyErr = value as unknown as { code?: unknown };
+    return {
+      name: value.name,
+      message: value.message,
+      code: typeof anyErr.code === 'string' ? anyErr.code : undefined,
+    };
+  }
+  if (typeof value === 'object' && value !== null) {
+    const anyObj = value as Record<string, unknown>;
+    const name = typeof anyObj.name === 'string' ? anyObj.name : undefined;
+    const message =
+      typeof anyObj.message === 'string' ? anyObj.message : undefined;
+    const code = typeof anyObj.code === 'string' ? anyObj.code : undefined;
+    if (name || message || code) {
+      return { name, message, code };
+    }
+  }
+  return { message: typeof value === 'string' ? value : undefined };
+}
+
 function validateEnvForStartup(): void {
   requireEnv('MONGO_URI');
 
@@ -212,15 +238,22 @@ async function bootstrap() {
   const bootstrapLogger = new Logger('bootstrap');
   process.on('unhandledRejection', (reason: unknown) => {
     bootstrapLogger.error(
-      JSON.stringify({ event: 'process.unhandled_rejection' }),
+      JSON.stringify({
+        event: 'process.unhandled_rejection',
+        reason: toSafeErrorLog(reason),
+      }),
     );
-    void reason;
+    if (isProd) {
+      process.exit(1);
+    }
   });
   process.on('uncaughtException', (error: unknown) => {
     bootstrapLogger.error(
-      JSON.stringify({ event: 'process.uncaught_exception' }),
+      JSON.stringify({
+        event: 'process.uncaught_exception',
+        error: toSafeErrorLog(error),
+      }),
     );
-    void error;
     if (isProd) {
       process.exit(1);
     }
@@ -305,8 +338,9 @@ async function bootstrap() {
   if (redisUrl && shouldUseRedisRateLimit) {
     const redis = createClient({ url: redisUrl });
     redis.on('error', (err) => {
-      bootstrapLogger.error(JSON.stringify({ event: 'redis.error' }));
-      void err;
+      bootstrapLogger.error(
+        JSON.stringify({ event: 'redis.error', error: toSafeErrorLog(err) }),
+      );
     });
     await redis.connect();
 
@@ -315,9 +349,11 @@ async function bootstrap() {
       rules,
       onError: (err) => {
         bootstrapLogger.error(
-          JSON.stringify({ event: 'rate_limit.redis_error' }),
+          JSON.stringify({
+            event: 'rate_limit.redis_error',
+            error: toSafeErrorLog(err),
+          }),
         );
-        void err;
       },
     });
     app.use(middleware);
@@ -463,7 +499,20 @@ async function bootstrap() {
     }
   }
 
-  await app.listen(process.env.PORT ?? 3000);
+  const portRaw = process.env.PORT ?? 3000;
+  await app.listen(portRaw);
+  bootstrapLogger.log(
+    JSON.stringify({ event: 'server.listening', port: String(portRaw) }),
+  );
 }
 
-void bootstrap();
+void bootstrap().catch((error: unknown) => {
+  const bootstrapLogger = new Logger('bootstrap');
+  bootstrapLogger.error(
+    JSON.stringify({
+      event: 'bootstrap.rejected',
+      error: toSafeErrorLog(error),
+    }),
+  );
+  process.exit(1);
+});
