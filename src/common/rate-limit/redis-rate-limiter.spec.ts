@@ -1,5 +1,6 @@
 import { createRedisRateLimitMiddleware } from './redis-rate-limiter';
 import type { Request, Response } from 'express';
+import type { RedisClientType } from 'redis';
 
 describe('createRedisRateLimitMiddleware', () => {
   it('enforces limits for matching routes using Redis eval', async () => {
@@ -131,7 +132,15 @@ describe('createRedisRateLimitMiddleware', () => {
   });
 
   it('ignores non-matching routes', async () => {
-    const client = { eval: jest.fn(() => Promise.resolve([1, 0] as const)) };
+    const evalMock = jest.fn(
+      (script: string, opts: { keys: string[]; arguments: string[] }) => {
+        void script;
+        void opts;
+        return Promise.resolve([1, 0]);
+      },
+    ) as unknown as Pick<RedisClientType, 'eval'>['eval'];
+
+    const client: Pick<RedisClientType, 'eval'> = { eval: evalMock };
     const middleware = createRedisRateLimitMiddleware({
       client,
       rules: [

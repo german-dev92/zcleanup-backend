@@ -30,6 +30,12 @@ export class Booking {
   @Prop({ required: false })
   address?: string;
 
+  @Prop({ type: Number, required: false })
+  lat?: number;
+
+  @Prop({ type: Number, required: false })
+  lng?: number;
+
   @Prop({ required: true })
   cleaningType: string;
 
@@ -48,6 +54,18 @@ export class Booking {
 
   @Prop({ default: false })
   applyFirstDiscount?: boolean;
+
+  @Prop({ default: false })
+  distanceSurcharge?: boolean;
+
+  @Prop({ required: false })
+  assignedZone?: string;
+
+  @Prop({ default: false })
+  isBorderline?: boolean;
+
+  @Prop({ type: Number, required: false })
+  distanceKm?: number;
 
   @Prop({ type: String, enum: BOOKING_STATUSES, default: 'pending' })
   status: BookingStatus;

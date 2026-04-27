@@ -9,6 +9,7 @@ import { Payment, PaymentSchema } from '../payments/schemas/payment.schema';
 import { BookingStateService } from './booking-state.service';
 import { EmployeesService } from '../employees/employees.service';
 import { DiscountUsedSchema } from '../discounts/schemas/discount-used.schema';
+import { GeoPricingService } from './geo-pricing.service';
 
 describe('BookingService', () => {
   let service: BookingService;
@@ -18,6 +19,10 @@ describe('BookingService', () => {
       providers: [
         BookingService,
         BookingStateService,
+        {
+          provide: GeoPricingService,
+          useValue: {},
+        },
         {
           provide: getModelToken(Booking.name),
           useValue: {},
@@ -62,6 +67,7 @@ describe('BookingService', () => {
       calculatePricingBreakdown: (
         data: unknown,
         discountApplied: boolean,
+        distanceFee: number,
       ) => PricingBreakdown;
     };
 
@@ -75,6 +81,7 @@ describe('BookingService', () => {
           distanceSurcharge: false,
         },
         false,
+        0,
       ).baseServicePrice;
 
     expect(calc(1, 1)).toBe(60);
@@ -90,16 +97,17 @@ describe('BookingService', () => {
     expect(calc(1, 10)).toBe(100);
   });
 
-  it('includes distance surcharge (+$20) in final price when distanceSurcharge=true', () => {
+  it('ignores client-provided distanceSurcharge and only uses server-computed distanceFee', () => {
     type PricingBreakdown = { finalPrice: number; distanceFee: number };
     const svc = service as unknown as {
       calculatePricingBreakdown: (
         data: unknown,
         discountApplied: boolean,
+        distanceFee: number,
       ) => PricingBreakdown;
     };
 
-    const res = svc.calculatePricingBreakdown(
+    const ignored = svc.calculatePricingBreakdown(
       {
         serviceType: 'post_construction',
         postConstruction: { hours: 1, cleaners: 1 },
@@ -108,10 +116,26 @@ describe('BookingService', () => {
         distanceSurcharge: true,
       },
       false,
+      0,
     );
 
-    expect(res.distanceFee).toBe(20);
-    expect(res.finalPrice).toBe(80);
+    expect(ignored.distanceFee).toBe(0);
+    expect(ignored.finalPrice).toBe(60);
+
+    const applied = svc.calculatePricingBreakdown(
+      {
+        serviceType: 'post_construction',
+        postConstruction: { hours: 1, cleaners: 1 },
+        extras: [],
+        petsAtHome: false,
+        distanceSurcharge: false,
+      },
+      false,
+      20,
+    );
+
+    expect(applied.distanceFee).toBe(20);
+    expect(applied.finalPrice).toBe(80);
   });
 
   describe('toStripeAmountCents', () => {
@@ -181,5 +205,16 @@ describe('BookingService', () => {
         ),
       ).toBe(true);
     });
+  });
+});
+
+describe('GeoPricingService', () => {
+  it('classifies a known Tampa coordinate as inside Tampa coverage', () => {
+    const geo = new GeoPricingService();
+    const res = geo.computeSurcharge(27.9506, -82.4572);
+    expect(res.status).toBe('inside');
+    expect(res.assignedZone).toBe('Tampa');
+    expect(res.distanceSurcharge).toBe(false);
+    expect(res.isBorderline).toBe(false);
   });
 });

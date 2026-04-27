@@ -1,13 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import nodemailer, { type Transporter } from 'nodemailer';
 
-import { EmailBuilder } from './email.builder.js';
+import { EmailBuilder } from './email.builder';
 import type {
   BookingEmailPayload,
   BookingEventType,
   ContractAttachmentOption,
   EmailAttachment,
-} from './email.builder.js';
+} from './email.builder';
 
 @Injectable()
 export class EmailService {

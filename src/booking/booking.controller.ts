@@ -11,6 +11,15 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBody,
+  ApiCreatedResponse,
+  ApiProperty,
+  ApiPropertyOptional,
+  ApiQuery,
+  ApiOkResponse,
+  ApiTags,
+} from '@nestjs/swagger';
+import {
   ArrayNotEmpty,
   ArrayMaxSize,
   IsArray,
@@ -21,6 +30,9 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsNumber,
+  Max,
+  MaxLength,
   Min,
   registerDecorator,
   type ValidationArguments,
@@ -35,6 +47,278 @@ import { Roles } from '../auth/roles.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { UserRole } from '../auth/roles.enum';
 import type { AuthUser } from '../auth/auth.types';
+
+class AppliedDiscountDto {
+  @ApiProperty()
+  code: string;
+
+  @ApiProperty()
+  percent: number;
+
+  @ApiProperty()
+  amount: number;
+}
+
+class PricePreviewItemDto {
+  @ApiProperty()
+  label: string;
+
+  @ApiProperty()
+  amount: number;
+}
+
+class PricePreviewBreakdownDto {
+  @ApiProperty()
+  estimatedBase: number;
+
+  @ApiProperty()
+  baseServicePrice: number;
+
+  @ApiProperty()
+  additionalBedroomsFee: number;
+
+  @ApiProperty()
+  discountedEstimatedPrice: number;
+
+  @ApiProperty()
+  extrasTotal: number;
+
+  @ApiProperty()
+  petsFee: number;
+
+  @ApiProperty()
+  distanceFee: number;
+
+  @ApiProperty()
+  discountPercent: number;
+
+  @ApiProperty()
+  discountAmount: number;
+
+  @ApiProperty()
+  finalPrice: number;
+
+  @ApiProperty({ type: () => [PricePreviewItemDto] })
+  items: PricePreviewItemDto[];
+}
+
+class PricePreviewFeesDto {
+  @ApiProperty()
+  petsFee: number;
+
+  @ApiProperty()
+  distanceFee: number;
+}
+
+class PricePreviewResponseDto {
+  @ApiProperty()
+  estimatedPrice: number;
+
+  @ApiProperty()
+  finalPricePreview: number;
+
+  @ApiProperty()
+  finalPrice: number;
+
+  @ApiProperty()
+  baseServicePrice: number;
+
+  @ApiProperty()
+  additionalBedroomsFee: number;
+
+  @ApiProperty()
+  discountedEstimatedPrice: number;
+
+  @ApiProperty()
+  discountPercent: number;
+
+  @ApiProperty()
+  discountAmount: number;
+
+  @ApiProperty()
+  extrasTotal: number;
+
+  @ApiProperty()
+  petsFee: number;
+
+  @ApiProperty()
+  distanceFee: number;
+
+  @ApiProperty()
+  distanceSurcharge: boolean;
+
+  @ApiProperty({ type: () => PricePreviewFeesDto })
+  fees: PricePreviewFeesDto;
+
+  @ApiProperty({ type: () => [AppliedDiscountDto] })
+  appliedDiscounts: AppliedDiscountDto[];
+
+  @ApiProperty({ type: () => PricePreviewBreakdownDto })
+  breakdown: PricePreviewBreakdownDto;
+
+  @ApiProperty()
+  isBorderline: boolean;
+
+  @ApiProperty({ nullable: true })
+  assignedZone: string | null;
+
+  @ApiProperty({ enum: ['inside', 'borderline', 'outside'] })
+  coverageStatus: 'inside' | 'borderline' | 'outside';
+
+  @ApiProperty({ nullable: true })
+  assignedDistanceKm: number | null;
+
+  @ApiProperty()
+  discountRequested: boolean;
+
+  @ApiProperty()
+  discountEligible: boolean;
+
+  @ApiProperty()
+  discountApplied: boolean;
+}
+
+class BookingPricingSummaryDto {
+  @ApiProperty()
+  estimatedPrice: number;
+
+  @ApiProperty()
+  discountApplied: boolean;
+
+  @ApiProperty()
+  finalPrice: number;
+}
+
+class BookingSummaryDto {
+  @ApiProperty()
+  _id: string;
+
+  @ApiProperty({
+    enum: [
+      'pending',
+      'confirmed',
+      'assigned',
+      'in_progress',
+      'completed',
+      'paid',
+      'cancelled',
+    ],
+  })
+  status:
+    | 'pending'
+    | 'confirmed'
+    | 'assigned'
+    | 'in_progress'
+    | 'completed'
+    | 'paid'
+    | 'cancelled';
+
+  @ApiPropertyOptional()
+  name?: string;
+
+  @ApiPropertyOptional()
+  email?: string;
+
+  @ApiPropertyOptional()
+  phone?: string;
+
+  @ApiPropertyOptional()
+  address?: string;
+
+  @ApiPropertyOptional()
+  cleaningType?: string;
+
+  @ApiPropertyOptional()
+  desiredDate?: string;
+
+  @ApiPropertyOptional()
+  desiredTime?: string;
+
+  @ApiPropertyOptional()
+  frequency?: string;
+
+  @ApiPropertyOptional()
+  petsAtHome?: boolean;
+
+  @ApiPropertyOptional()
+  useOwnProducts?: boolean;
+
+  @ApiPropertyOptional()
+  applyFirstDiscount?: boolean;
+
+  @ApiPropertyOptional({ type: () => [Object] })
+  extras?: unknown[];
+
+  @ApiPropertyOptional()
+  estimatedPrice?: number;
+
+  @ApiPropertyOptional()
+  finalPricePreview?: number;
+
+  @ApiPropertyOptional()
+  paymentUrl?: string;
+
+  @ApiPropertyOptional()
+  assignedEmployeeId?: string;
+
+  @ApiPropertyOptional()
+  assignedEmployeeEmail?: string;
+
+  @ApiPropertyOptional()
+  assignedAt?: string;
+
+  @ApiPropertyOptional()
+  startedAt?: string;
+
+  @ApiPropertyOptional()
+  completedAt?: string;
+
+  @ApiPropertyOptional()
+  assignedZone?: string;
+
+  @ApiPropertyOptional()
+  isBorderline?: boolean;
+
+  @ApiPropertyOptional()
+  distanceSurcharge?: boolean;
+
+  @ApiPropertyOptional()
+  distanceKm?: number;
+
+  @ApiPropertyOptional()
+  lat?: number;
+
+  @ApiPropertyOptional()
+  lng?: number;
+}
+
+class CreateBookingResponseDto {
+  @ApiProperty()
+  success: boolean;
+
+  @ApiProperty()
+  message: string;
+
+  @ApiProperty({ type: () => BookingSummaryDto })
+  data: BookingSummaryDto;
+
+  @ApiProperty()
+  discountApplied: boolean;
+
+  @ApiProperty({ type: () => BookingPricingSummaryDto })
+  pricing: BookingPricingSummaryDto;
+}
+
+class BookingMutationResponseDto {
+  @ApiProperty()
+  success: boolean;
+
+  @ApiProperty()
+  message: string;
+
+  @ApiProperty({ type: () => BookingSummaryDto })
+  data: BookingSummaryDto;
+}
 
 function IsExtrasArray(validationOptions?: ValidationOptions) {
   return (object: object, propertyName: string) => {
@@ -127,7 +411,22 @@ class AssignBookingDto {
 class PricePreviewDto {
   @IsOptional()
   @IsString()
+  @MaxLength(300)
   address?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  lat?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  lng?: number;
 
   @IsOptional()
   @IsString()
@@ -199,6 +498,7 @@ class PricePreviewDto {
 }
 
 @Controller('booking')
+@ApiTags('booking')
 export class BookingController {
   private readonly logger = new Logger(BookingController.name);
 
@@ -207,6 +507,12 @@ export class BookingController {
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPERVISOR)
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: BOOKING_STATUSES,
+  })
+  @ApiOkResponse({ type: BookingSummaryDto, isArray: true })
   getBookings(@Query() query: GetBookingsQueryDto) {
     return this.bookingService.getBookings(query.status);
   }
@@ -214,6 +520,7 @@ export class BookingController {
   @Get('assigned')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.EMPLOYEE)
+  @ApiOkResponse({ type: BookingSummaryDto, isArray: true })
   getAssignedBookings(@Req() req: { user?: AuthUser }) {
     return this.bookingService.getAssignedBookings(req.user);
   }
@@ -221,11 +528,14 @@ export class BookingController {
   @Get(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPERVISOR)
+  @ApiOkResponse({ type: BookingSummaryDto })
   getById(@Param('id') id: string) {
     return this.bookingService.getById(id);
   }
 
   @Post('price-preview')
+  @ApiBody({ type: PricePreviewDto })
+  @ApiOkResponse({ type: PricePreviewResponseDto })
   pricePreview(@Body() body: PricePreviewDto) {
     return this.bookingService.previewPricing(
       body as unknown as CreateBookingDto,
@@ -233,6 +543,8 @@ export class BookingController {
   }
 
   @Post()
+  @ApiBody({ type: CreateBookingDto })
+  @ApiCreatedResponse({ type: CreateBookingResponseDto })
   createBooking(@Body() body: CreateBookingDto) {
     return this.bookingService.createBooking(body);
   }
@@ -240,6 +552,7 @@ export class BookingController {
   @Patch(':id/status')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
+  @ApiOkResponse({ type: BookingMutationResponseDto })
   async updateBookingStatus(
     @Param('id') id: string,
     @Body() body: UpdateBookingStatusDto,
@@ -263,6 +576,7 @@ export class BookingController {
   @Patch(':id/assign')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPERVISOR)
+  @ApiOkResponse({ type: BookingMutationResponseDto })
   async assignBooking(@Param('id') id: string, @Body() body: AssignBookingDto) {
     const employeeIds = Array.isArray(body.employeeIds)
       ? body.employeeIds
@@ -284,6 +598,7 @@ export class BookingController {
   @Patch(':id/start')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.EMPLOYEE, UserRole.SUPERVISOR)
+  @ApiOkResponse({ type: BookingMutationResponseDto })
   async startBooking(@Param('id') id: string, @Req() req: { user?: AuthUser }) {
     const booking = await this.bookingService.startBooking(id, req.user);
     return {
@@ -296,6 +611,7 @@ export class BookingController {
   @Patch(':id/complete')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.EMPLOYEE, UserRole.SUPERVISOR)
+  @ApiOkResponse({ type: BookingMutationResponseDto })
   async completeBooking(
     @Param('id') id: string,
     @Req() req: { user?: AuthUser },

@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import * as fs from 'fs';
 
-import { buildBookingCancelledTemplate } from './templates/booking-cancelled.template.js';
-import { buildBookingConfirmedTemplate } from './templates/booking-confirmed.template.js';
-import { buildBookingCreatedTemplate } from './templates/booking-created.template.js';
+import { buildBookingCancelledTemplate } from './templates/booking-cancelled.template';
+import { buildBookingConfirmedTemplate } from './templates/booking-confirmed.template';
+import { buildBookingCreatedTemplate } from './templates/booking-created.template';
 
 export type BookingEventType =
   | 'booking.created'

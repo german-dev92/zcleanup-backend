@@ -5,6 +5,7 @@ import { BookingController } from './booking.controller';
 import { BookingService } from './booking.service';
 import { BookingStateService } from './booking-state.service';
 import { Booking, BookingSchema } from './schemas/booking.schema';
+import { GeoPricingService } from './geo-pricing.service';
 
 import { EmailModule } from '../email/email.module';
 import { DiscountsModule } from '../discounts/discounts.module'; // 👈 IMPORT
@@ -27,6 +28,6 @@ import { User, UserSchema } from '../users/schemas/user.schema';
     EmployeesModule,
   ],
   controllers: [BookingController],
-  providers: [BookingService, BookingStateService],
+  providers: [BookingService, BookingStateService, GeoPricingService],
 })
 export class BookingModule {}

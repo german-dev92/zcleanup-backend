@@ -1,0 +1,1150 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "operationId": "AuthController_login",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/employees": {
+      "post": {
+        "operationId": "EmployeesController_create",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEmployeeDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Employees"
+        ]
+      },
+      "get": {
+        "operationId": "EmployeesController_getAll",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Employees"
+        ]
+      }
+    },
+    "/employees/{id}": {
+      "patch": {
+        "operationId": "EmployeesController_update",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEmployeeDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Employees"
+        ]
+      },
+      "delete": {
+        "operationId": "EmployeesController_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Employees"
+        ]
+      }
+    },
+    "/employees/{id}/role": {
+      "patch": {
+        "operationId": "EmployeesController_updateRole",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEmployeeRoleDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Employees"
+        ]
+      }
+    },
+    "/booking": {
+      "get": {
+        "operationId": "BookingController_getBookings",
+        "parameters": [
+          {
+            "name": "status",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "enum": [
+                "pending",
+                "confirmed",
+                "assigned",
+                "in_progress",
+                "completed",
+                "cancelled",
+                "paid"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BookingSummaryDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      },
+      "post": {
+        "operationId": "BookingController_createBooking",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBookingDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateBookingResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/booking/assigned": {
+      "get": {
+        "operationId": "BookingController_getAssignedBookings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BookingSummaryDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/booking/{id}": {
+      "get": {
+        "operationId": "BookingController_getById",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingSummaryDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/booking/price-preview": {
+      "post": {
+        "operationId": "BookingController_pricePreview",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PricePreviewDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PricePreviewResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/booking/{id}/status": {
+      "patch": {
+        "operationId": "BookingController_updateBookingStatus",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBookingStatusDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingMutationResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/booking/{id}/assign": {
+      "patch": {
+        "operationId": "BookingController_assignBooking",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignBookingDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingMutationResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/booking/{id}/start": {
+      "patch": {
+        "operationId": "BookingController_startBooking",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingMutationResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/booking/{id}/complete": {
+      "patch": {
+        "operationId": "BookingController_completeBooking",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingMutationResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/discounts/check": {
+      "post": {
+        "operationId": "DiscountsController_checkDiscount",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckDiscountDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckDiscountResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "discounts"
+        ]
+      }
+    },
+    "/payments/checkout-session": {
+      "post": {
+        "operationId": "PaymentsController_createCheckoutSession",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCheckoutSessionDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Payments"
+        ]
+      }
+    },
+    "/payments/webhook": {
+      "post": {
+        "operationId": "PaymentsWebhookController_handleWebhook",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "PaymentsWebhook"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "ZCleanUp API",
+    "description": "",
+    "version": "1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "schemas": {
+      "LoginDto": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "maxLength": 254,
+            "format": "email"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ]
+      },
+      "CreateEmployeeDto": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 6
+          },
+          "name": {
+            "type": "string",
+            "minLength": 2
+          },
+          "phone": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "supervisor",
+              "employee"
+            ]
+          }
+        },
+        "required": [
+          "email",
+          "password",
+          "name"
+        ]
+      },
+      "UpdateEmployeeDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 2
+          },
+          "phone": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "supervisor",
+              "employee"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          }
+        }
+      },
+      "UpdateEmployeeRoleDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "BookingSummaryDto": {
+        "type": "object",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "confirmed",
+              "assigned",
+              "in_progress",
+              "completed",
+              "paid",
+              "cancelled"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "cleaningType": {
+            "type": "string"
+          },
+          "desiredDate": {
+            "type": "string"
+          },
+          "desiredTime": {
+            "type": "string"
+          },
+          "frequency": {
+            "type": "string"
+          },
+          "petsAtHome": {
+            "type": "boolean"
+          },
+          "useOwnProducts": {
+            "type": "boolean"
+          },
+          "applyFirstDiscount": {
+            "type": "boolean"
+          },
+          "extras": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "estimatedPrice": {
+            "type": "number"
+          },
+          "finalPricePreview": {
+            "type": "number"
+          },
+          "paymentUrl": {
+            "type": "string"
+          },
+          "assignedEmployeeId": {
+            "type": "string"
+          },
+          "assignedEmployeeEmail": {
+            "type": "string"
+          },
+          "assignedAt": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "completedAt": {
+            "type": "string"
+          },
+          "assignedZone": {
+            "type": "string"
+          },
+          "isBorderline": {
+            "type": "boolean"
+          },
+          "distanceSurcharge": {
+            "type": "boolean"
+          },
+          "distanceKm": {
+            "type": "number"
+          },
+          "lat": {
+            "type": "number"
+          },
+          "lng": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "_id",
+          "status"
+        ]
+      },
+      "PricePreviewDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "PricePreviewFeesDto": {
+        "type": "object",
+        "properties": {
+          "petsFee": {
+            "type": "number"
+          },
+          "distanceFee": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "petsFee",
+          "distanceFee"
+        ]
+      },
+      "AppliedDiscountDto": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "percent": {
+            "type": "number"
+          },
+          "amount": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "code",
+          "percent",
+          "amount"
+        ]
+      },
+      "PricePreviewItemDto": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "label",
+          "amount"
+        ]
+      },
+      "PricePreviewBreakdownDto": {
+        "type": "object",
+        "properties": {
+          "estimatedBase": {
+            "type": "number"
+          },
+          "baseServicePrice": {
+            "type": "number"
+          },
+          "additionalBedroomsFee": {
+            "type": "number"
+          },
+          "discountedEstimatedPrice": {
+            "type": "number"
+          },
+          "extrasTotal": {
+            "type": "number"
+          },
+          "petsFee": {
+            "type": "number"
+          },
+          "distanceFee": {
+            "type": "number"
+          },
+          "discountPercent": {
+            "type": "number"
+          },
+          "discountAmount": {
+            "type": "number"
+          },
+          "finalPrice": {
+            "type": "number"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PricePreviewItemDto"
+            }
+          }
+        },
+        "required": [
+          "estimatedBase",
+          "baseServicePrice",
+          "additionalBedroomsFee",
+          "discountedEstimatedPrice",
+          "extrasTotal",
+          "petsFee",
+          "distanceFee",
+          "discountPercent",
+          "discountAmount",
+          "finalPrice",
+          "items"
+        ]
+      },
+      "PricePreviewResponseDto": {
+        "type": "object",
+        "properties": {
+          "estimatedPrice": {
+            "type": "number"
+          },
+          "finalPricePreview": {
+            "type": "number"
+          },
+          "finalPrice": {
+            "type": "number"
+          },
+          "baseServicePrice": {
+            "type": "number"
+          },
+          "additionalBedroomsFee": {
+            "type": "number"
+          },
+          "discountedEstimatedPrice": {
+            "type": "number"
+          },
+          "discountPercent": {
+            "type": "number"
+          },
+          "discountAmount": {
+            "type": "number"
+          },
+          "extrasTotal": {
+            "type": "number"
+          },
+          "petsFee": {
+            "type": "number"
+          },
+          "distanceFee": {
+            "type": "number"
+          },
+          "distanceSurcharge": {
+            "type": "boolean"
+          },
+          "fees": {
+            "$ref": "#/components/schemas/PricePreviewFeesDto"
+          },
+          "appliedDiscounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AppliedDiscountDto"
+            }
+          },
+          "breakdown": {
+            "$ref": "#/components/schemas/PricePreviewBreakdownDto"
+          },
+          "isBorderline": {
+            "type": "boolean"
+          },
+          "assignedZone": {
+            "type": "object",
+            "nullable": true
+          },
+          "coverageStatus": {
+            "type": "string",
+            "enum": [
+              "inside",
+              "borderline",
+              "outside"
+            ]
+          },
+          "assignedDistanceKm": {
+            "type": "object",
+            "nullable": true
+          },
+          "discountRequested": {
+            "type": "boolean"
+          },
+          "discountEligible": {
+            "type": "boolean"
+          },
+          "discountApplied": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "estimatedPrice",
+          "finalPricePreview",
+          "finalPrice",
+          "baseServicePrice",
+          "additionalBedroomsFee",
+          "discountedEstimatedPrice",
+          "discountPercent",
+          "discountAmount",
+          "extrasTotal",
+          "petsFee",
+          "distanceFee",
+          "distanceSurcharge",
+          "fees",
+          "appliedDiscounts",
+          "breakdown",
+          "isBorderline",
+          "assignedZone",
+          "coverageStatus",
+          "assignedDistanceKm",
+          "discountRequested",
+          "discountEligible",
+          "discountApplied"
+        ]
+      },
+      "CreateBookingDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "email": {
+            "type": "string",
+            "maxLength": 254,
+            "format": "email"
+          },
+          "phone": {
+            "type": "string",
+            "maxLength": 30
+          },
+          "address": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "lat": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90
+          },
+          "lng": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180
+          },
+          "serviceType": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "cleaningType": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "desiredDate": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "desiredTime": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "frequency": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "petsAtHome": {
+            "type": "boolean"
+          },
+          "useOwnProducts": {
+            "type": "boolean"
+          },
+          "applyFirstDiscount": {
+            "type": "boolean"
+          },
+          "bedrooms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "bathrooms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "additionalBedrooms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "distanceSurcharge": {
+            "type": "boolean"
+          },
+          "assignedZone": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "isBorderline": {
+            "type": "boolean"
+          },
+          "distanceKm": {
+            "type": "number",
+            "minimum": 0
+          },
+          "moveMode": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "postConstruction": {
+            "type": "object"
+          },
+          "windowCleaning": {
+            "type": "object"
+          },
+          "dynamicFields": {
+            "type": "object"
+          },
+          "extras": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "estimatedPrice": {
+            "type": "number"
+          },
+          "finalPricePreview": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "email",
+          "cleaningType",
+          "desiredDate",
+          "desiredTime"
+        ]
+      },
+      "BookingPricingSummaryDto": {
+        "type": "object",
+        "properties": {
+          "estimatedPrice": {
+            "type": "number"
+          },
+          "discountApplied": {
+            "type": "boolean"
+          },
+          "finalPrice": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "estimatedPrice",
+          "discountApplied",
+          "finalPrice"
+        ]
+      },
+      "CreateBookingResponseDto": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/BookingSummaryDto"
+          },
+          "discountApplied": {
+            "type": "boolean"
+          },
+          "pricing": {
+            "$ref": "#/components/schemas/BookingPricingSummaryDto"
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "data",
+          "discountApplied",
+          "pricing"
+        ]
+      },
+      "UpdateBookingStatusDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "BookingMutationResponseDto": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/BookingSummaryDto"
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "data"
+        ]
+      },
+      "AssignBookingDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "CheckDiscountDto": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckDiscountResponseDto": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "canUseDiscount": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canUseDiscount"
+        ]
+      },
+      "CreateCheckoutSessionDto": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  }
+}

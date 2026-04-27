@@ -18,6 +18,7 @@ import { Observable, throwError } from 'rxjs';
 import { catchError, tap } from 'rxjs/operators';
 import type { ValidationError } from 'class-validator';
 import { createClient } from 'redis';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import {
   createRedisRateLimitMiddleware,
   type RateLimitRule,
@@ -236,6 +237,56 @@ async function bootstrap() {
   const isProd = nodeEnv === 'production';
 
   const bootstrapLogger = new Logger('bootstrap');
+  const primaryGeoKey =
+    typeof process.env.GOOGLE_MAPS_SERVER_API_KEY === 'string'
+      ? process.env.GOOGLE_MAPS_SERVER_API_KEY.trim()
+      : '';
+  const fallbackGeoKeyMaps =
+    typeof process.env.GOOGLE_MAPS_API_KEY === 'string'
+      ? process.env.GOOGLE_MAPS_API_KEY.trim()
+      : '';
+  const fallbackGeoKeyGoogle =
+    typeof process.env.GOOGLE_API_KEY === 'string'
+      ? process.env.GOOGLE_API_KEY.trim()
+      : '';
+
+  const hasKey = !!(
+    primaryGeoKey ||
+    fallbackGeoKeyMaps ||
+    fallbackGeoKeyGoogle
+  );
+  const usingFallback =
+    !primaryGeoKey && !!(fallbackGeoKeyMaps || fallbackGeoKeyGoogle);
+  const keySource = primaryGeoKey
+    ? 'primary'
+    : fallbackGeoKeyMaps
+      ? 'fallback_google_maps_api_key'
+      : fallbackGeoKeyGoogle
+        ? 'fallback_google_api_key'
+        : 'none';
+
+  bootstrapLogger.log(
+    JSON.stringify({
+      event: 'geo.config_check',
+      hasKey,
+      usingFallback,
+      keySource,
+    }),
+  );
+  if (!hasKey) {
+    bootstrapLogger.error(JSON.stringify({ event: 'geo.config_missing' }));
+    process.env.GEO_PRICING_GEOCODING_STATUS = 'degraded';
+  } else if (usingFallback) {
+    bootstrapLogger.warn(
+      JSON.stringify({
+        event: 'geo.config_fallback_used',
+        keySource,
+      }),
+    );
+    process.env.GEO_PRICING_GEOCODING_STATUS = 'degraded';
+  } else {
+    process.env.GEO_PRICING_GEOCODING_STATUS = 'ok';
+  }
   process.on('unhandledRejection', (reason: unknown) => {
     bootstrapLogger.error(
       JSON.stringify({
@@ -294,9 +345,16 @@ async function bootstrap() {
   }
 
   const bookingRateLimitWindowMs = Number(
-    process.env.BOOKING_RATE_WINDOW_MS ?? 60_000,
+    process.env.BOOKING_RATE_WINDOW_MS ?? 900_000,
   );
-  const bookingRateLimitMax = Number(process.env.BOOKING_RATE_MAX ?? 20);
+  const bookingRateLimitMax = Number(process.env.BOOKING_RATE_MAX ?? 15);
+
+  const pricePreviewRateLimitWindowMs = Number(
+    process.env.PRICE_PREVIEW_RATE_WINDOW_MS ?? 900_000,
+  );
+  const pricePreviewRateLimitMax = Number(
+    process.env.PRICE_PREVIEW_RATE_MAX ?? 50,
+  );
 
   const authRateLimitWindowMs = Number(
     process.env.AUTH_RATE_WINDOW_MS ?? 60_000,
@@ -311,6 +369,14 @@ async function bootstrap() {
       max: bookingRateLimitMax,
       keyPrefix: 'rl:booking',
       message: 'Too many booking requests. Please try again later.',
+    },
+    {
+      method: 'POST',
+      path: '/booking/price-preview',
+      windowMs: pricePreviewRateLimitWindowMs,
+      max: pricePreviewRateLimitMax,
+      keyPrefix: 'rl:price_preview',
+      message: 'Too many price preview requests. Please try again later.',
     },
     {
       method: 'POST',
@@ -441,6 +507,18 @@ async function bootstrap() {
   );
 
   app.useGlobalInterceptors(new RequestLoggingInterceptor());
+
+  const swaggerEnabled =
+    process.env.SWAGGER_ENABLED === 'true' ||
+    process.env.NODE_ENV !== 'production';
+  if (swaggerEnabled) {
+    const config = new DocumentBuilder()
+      .setTitle('ZCleanUp API')
+      .setVersion('1.0')
+      .build();
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('docs', app, document);
+  }
 
   const ensureIndexesRaw =
     typeof process.env.MONGO_ENSURE_INDEXES_ON_STARTUP === 'string'

@@ -1,4 +1,4 @@
-import { type BookingEmailTemplateViewModel } from '../email.builder.js';
+import { type BookingEmailTemplateViewModel } from '../email.builder';
 
 export function buildBookingConfirmedTemplate(
   model: BookingEmailTemplateViewModel,

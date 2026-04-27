@@ -10,6 +10,7 @@ import {
   IsNumber,
   IsInt,
   MaxLength,
+  Max,
   Min,
   IsObject,
   registerDecorator,
@@ -153,6 +154,20 @@ export class CreateBookingDto {
   @MaxLength(300)
   address?: string;
 
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  lat?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  lng?: number;
+
   // ======================
   // 🔹 SERVICE INFO
   // ======================
@@ -223,6 +238,21 @@ export class CreateBookingDto {
   @IsOptional()
   @IsBoolean()
   distanceSurcharge?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  assignedZone?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isBorderline?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  distanceKm?: number;
 
   @IsOptional()
   @IsString()

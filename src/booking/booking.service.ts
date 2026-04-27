@@ -24,10 +24,13 @@ import { BookingStateService } from './booking-state.service';
 import { EmployeesService } from '../employees/employees.service';
 import type { AuthUser } from '../auth/auth.types';
 import { UserRole } from '../auth/roles.enum';
+import { GeoPricingService } from './geo-pricing.service';
 
 @Injectable()
 export class BookingService {
   private readonly logger = new Logger(BookingService.name);
+
+  private readonly distanceSurchargeFee = 20;
 
   constructor(
     @InjectModel(Booking.name)
@@ -39,6 +42,7 @@ export class BookingService {
     private stripeService: StripeService,
     private bookingStateService: BookingStateService,
     private employeesService: EmployeesService,
+    private geoPricingService: GeoPricingService,
   ) {}
 
   async previewPricing(data: CreateBookingDto) {
@@ -64,10 +68,70 @@ export class BookingService {
       }
     }
 
-    const pricing = this.calculatePricingBreakdown(data, discountApplied);
+    const address = typeof data.address === 'string' ? data.address.trim() : '';
+    const hasCoords =
+      typeof data.lat === 'number' && typeof data.lng === 'number';
+    const shouldComputeGeo = !!address || hasCoords;
+
+    const geo = shouldComputeGeo
+      ? await this.geoPricingService.computeFromInput({
+          address,
+          lat: data.lat,
+          lng: data.lng,
+        })
+      : null;
+
+    const distanceSurcharge = geo?.distanceSurcharge === true;
+    const distanceFee = distanceSurcharge ? this.distanceSurchargeFee : 0;
+
+    const pricing = this.calculatePricingBreakdown(
+      data,
+      discountApplied,
+      distanceFee,
+    );
+    const estimatedBase = this.roundCurrency(pricing.baseServicePrice);
+    const appliedDiscounts =
+      discountApplied && pricing.discountAmount > 0
+        ? [
+            {
+              code: 'first_service',
+              percent: pricing.discountPercent,
+              amount: pricing.discountAmount,
+            },
+          ]
+        : [];
+    const items = [
+      { label: 'Base service', amount: estimatedBase },
+      ...(pricing.additionalBedroomsFee > 0
+        ? [
+            {
+              label: 'Additional bedrooms',
+              amount: pricing.additionalBedroomsFee,
+            },
+          ]
+        : []),
+      ...(pricing.extrasTotal > 0
+        ? [{ label: 'Selected extras', amount: pricing.extrasTotal }]
+        : []),
+      ...(pricing.petsFee > 0
+        ? [{ label: 'Pets', amount: pricing.petsFee }]
+        : []),
+      ...(pricing.distanceFee > 0
+        ? [{ label: 'Distance surcharge', amount: pricing.distanceFee }]
+        : []),
+      ...(discountApplied && pricing.discountAmount > 0
+        ? [
+            {
+              label: `Discount (${pricing.discountPercent}%)`,
+              amount: -pricing.discountAmount,
+            },
+          ]
+        : []),
+    ];
     return {
       estimatedPrice: pricing.estimatedPrice,
       finalPricePreview: pricing.finalPrice,
+      finalPrice: pricing.finalPrice,
       baseServicePrice: pricing.baseServicePrice,
       additionalBedroomsFee: pricing.additionalBedroomsFee,
       discountedEstimatedPrice: pricing.discountedEstimatedPrice,
@@ -76,6 +140,29 @@ export class BookingService {
       extrasTotal: pricing.extrasTotal,
       petsFee: pricing.petsFee,
       distanceFee: pricing.distanceFee,
+      distanceSurcharge,
+      fees: {
+        petsFee: pricing.petsFee,
+        distanceFee: pricing.distanceFee,
+      },
+      appliedDiscounts,
+      breakdown: {
+        estimatedBase,
+        baseServicePrice: pricing.baseServicePrice,
+        additionalBedroomsFee: pricing.additionalBedroomsFee,
+        discountedEstimatedPrice: pricing.discountedEstimatedPrice,
+        extrasTotal: pricing.extrasTotal,
+        petsFee: pricing.petsFee,
+        distanceFee: pricing.distanceFee,
+        discountPercent: pricing.discountPercent,
+        discountAmount: pricing.discountAmount,
+        finalPrice: pricing.finalPrice,
+        items,
+      },
+      isBorderline: geo?.isBorderline === true,
+      assignedZone: geo?.assignedZone ?? null,
+      coverageStatus: geo?.status ?? 'outside',
+      assignedDistanceKm: geo?.distanceKm ?? null,
       discountRequested: wantsDiscountRequested,
       discountEligible,
       discountApplied,
@@ -103,6 +190,7 @@ export class BookingService {
         data.desiredDate,
         data.desiredTime,
       );
+      this.enforceBookingScheduleRules(desiredAt);
       if (desiredAt.getTime() <= Date.now()) {
         throw new BadRequestException(
           'Desired date/time must be in the future',
@@ -138,7 +226,17 @@ export class BookingService {
         wantsDiscountRequested &&
         discountEligible &&
         normalizedAddress !== null;
-      const pricing = this.calculatePricingBreakdown(data, discountApplied);
+      const geo = await this.geoPricingService.computeFromInput({
+        address: typeof data.address === 'string' ? data.address.trim() : '',
+        lat: data.lat,
+        lng: data.lng,
+      });
+      const distanceFee = geo.distanceSurcharge ? this.distanceSurchargeFee : 0;
+      const pricing = this.calculatePricingBreakdown(
+        data,
+        discountApplied,
+        distanceFee,
+      );
 
       this.logger.debug(
         JSON.stringify({
@@ -153,6 +251,10 @@ export class BookingService {
           event: 'pricing.computed',
           estimatedPrice: pricing.estimatedPrice,
           finalPrice: pricing.finalPrice,
+          distanceFee,
+          distanceSurcharge: geo.distanceSurcharge,
+          assignedZone: geo.assignedZone,
+          isBorderline: geo.isBorderline,
         }),
       );
 
@@ -188,65 +290,48 @@ export class BookingService {
       }
 
       const bookingData = this.stripClientControlledFields(data);
+      const geoPayload: Partial<CreateBookingDto> = {
+        lat: geo.lat ?? undefined,
+        lng: geo.lng ?? undefined,
+        distanceSurcharge: geo.distanceSurcharge,
+        assignedZone: geo.assignedZone ?? undefined,
+        isBorderline: geo.isBorderline,
+        distanceKm: geo.distanceKm ?? undefined,
+      };
+
+      const bookingDataWithGeo = {
+        ...bookingData,
+        ...geoPayload,
+      } as Omit<
+        CreateBookingDto,
+        'estimatedPrice' | 'finalPricePreview' | 'applyFirstDiscount'
+      >;
 
       if (discountApplied && normalizedAddress) {
-        try {
-          const createdBooking = await this.createWithDiscountTransaction(
-            bookingData,
-            normalizedAddress,
-            pricing,
-          );
-          this.logPricingMismatchIfDetected(createdBooking, pricing.finalPrice);
-          this.emitBookingCreatedEvent(createdBooking);
+        const createdBooking = await this.createWithDiscountRollback(
+          bookingDataWithGeo,
+          normalizedAddress,
+          pricing,
+        );
+        this.logPricingMismatchIfDetected(createdBooking, pricing.finalPrice);
+        this.emitBookingCreatedEvent(createdBooking);
 
-          return {
-            success: true,
-            message: 'Booking saved successfully',
-            data: this.toFrontendBooking(createdBooking),
+        return {
+          success: true,
+          message: 'Booking saved successfully',
+          data: this.toFrontendBooking(createdBooking),
+          discountApplied: true,
+          pricing: {
+            estimatedPrice: pricing.estimatedPrice,
             discountApplied: true,
-            pricing: {
-              estimatedPrice: pricing.estimatedPrice,
-              discountApplied: true,
-              finalPrice: pricing.finalPrice,
-            },
-          };
-        } catch (error) {
-          if (this.isTransactionNotSupportedError(error)) {
-            this.logger.warn(
-              JSON.stringify({
-                event: 'discount.fallback_without_transaction',
-              }),
-            );
-            const createdBooking = await this.createWithDiscountRollback(
-              bookingData,
-              normalizedAddress,
-              pricing,
-            );
-            this.logPricingMismatchIfDetected(
-              createdBooking,
-              pricing.finalPrice,
-            );
-            this.emitBookingCreatedEvent(createdBooking);
-
-            return {
-              success: true,
-              message: 'Booking saved successfully',
-              data: this.toFrontendBooking(createdBooking),
-              discountApplied: true,
-              pricing: {
-                estimatedPrice: pricing.estimatedPrice,
-                discountApplied: true,
-                finalPrice: pricing.finalPrice,
-              },
-            };
-          }
-
-          throw error;
-        }
+            finalPrice: pricing.finalPrice,
+          },
+        };
       }
 
       const payload = {
         ...bookingData,
+        ...geoPayload,
         status: 'pending' as const,
         applyFirstDiscount: false,
         estimatedPrice: pricing.estimatedPrice,
@@ -1017,17 +1102,28 @@ export class BookingService {
     data: CreateBookingDto,
   ): Omit<
     CreateBookingDto,
-    'estimatedPrice' | 'finalPricePreview' | 'applyFirstDiscount'
+    | 'estimatedPrice'
+    | 'finalPricePreview'
+    | 'applyFirstDiscount'
+    | 'distanceSurcharge'
+    | 'lat'
+    | 'lng'
   > {
     const {
       estimatedPrice: _estimatedPrice,
       finalPricePreview: _finalPricePreview,
       applyFirstDiscount: _applyFirstDiscount,
+      distanceSurcharge: _distanceSurcharge,
+      lat: _lat,
+      lng: _lng,
       ...rest
     } = data;
     void _estimatedPrice;
     void _finalPricePreview;
     void _applyFirstDiscount;
+    void _distanceSurcharge;
+    void _lat;
+    void _lng;
     return rest;
   }
 
@@ -1221,11 +1317,56 @@ export class BookingService {
     return dt;
   }
 
+  private enforceBookingScheduleRules(desiredAt: Date): void {
+    const now = new Date();
+    const startOfToday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    );
+    const maxDateInclusive = new Date(startOfToday);
+    maxDateInclusive.setDate(maxDateInclusive.getDate() + 30);
+
+    const desiredDateOnly = new Date(
+      desiredAt.getFullYear(),
+      desiredAt.getMonth(),
+      desiredAt.getDate(),
+    );
+    if (desiredDateOnly.getTime() < startOfToday.getTime()) {
+      throw new BadRequestException('Desired date must be today or later');
+    }
+    if (desiredDateOnly.getTime() > maxDateInclusive.getTime()) {
+      throw new BadRequestException(
+        'Desired date must be within 30 days from today',
+      );
+    }
+
+    const hour = desiredAt.getHours();
+    const minute = desiredAt.getMinutes();
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+      throw new BadRequestException('Invalid desiredDate/desiredTime');
+    }
+
+    const minutes = hour * 60 + minute;
+    const minMinutes = 8 * 60;
+    const maxMinutes = 17 * 60;
+    if (minutes < minMinutes || minutes > maxMinutes) {
+      throw new BadRequestException(
+        'Desired time must be between 08:00 and 17:00',
+      );
+    }
+  }
+
   private calculatePricing(
     data: CreateBookingDto,
     discountApplied: boolean,
+    distanceFee: number,
   ): { estimatedPrice: number; finalPrice: number } {
-    const pricing = this.calculatePricingBreakdown(data, discountApplied);
+    const pricing = this.calculatePricingBreakdown(
+      data,
+      discountApplied,
+      distanceFee,
+    );
     return {
       estimatedPrice: pricing.estimatedPrice,
       finalPrice: pricing.finalPrice,
@@ -1235,6 +1376,7 @@ export class BookingService {
   private calculatePricingBreakdown(
     data: CreateBookingDto,
     discountApplied: boolean,
+    distanceFee: number,
   ): {
     estimatedPrice: number;
     finalPrice: number;
@@ -1272,9 +1414,10 @@ export class BookingService {
     log('[PRICING EXTRAS BREAKDOWN]', extrasResult);
 
     const petsFee = this.readBooleanField(data, 'petsAtHome') ? 10 : 0;
-    const distanceFee = this.readBooleanField(data, 'distanceSurcharge')
-      ? 20
-      : 0;
+    const normalizedDistanceFee =
+      typeof distanceFee === 'number' && Number.isFinite(distanceFee)
+        ? this.roundCurrency(Math.max(0, distanceFee))
+        : 0;
 
     let baseServicePrice = 0;
     let additionalBedrooms = 0;
@@ -1442,7 +1585,7 @@ export class BookingService {
 
     const extrasTotal = this.roundCurrency(extrasResult.total);
     const finalPriceRaw =
-      discountedEstimatedPrice + extrasTotal + petsFee + distanceFee;
+      discountedEstimatedPrice + extrasTotal + petsFee + normalizedDistanceFee;
     const finalPrice = this.roundCurrency(finalPriceRaw);
 
     log('[PRICING FINAL]', {
@@ -1452,7 +1595,7 @@ export class BookingService {
         discountedEstimatedPrice,
         extrasTotal,
         petsFee,
-        distanceFee,
+        distanceFee: normalizedDistanceFee,
       },
     });
 
@@ -1466,7 +1609,7 @@ export class BookingService {
       discountAmount,
       extrasTotal,
       petsFee,
-      distanceFee,
+      distanceFee: normalizedDistanceFee,
     };
   }
 
@@ -2202,6 +2345,7 @@ export class BookingService {
 
     const distanceSurcharge =
       obj.distanceSurcharge === true || dyn.distanceSurcharge === true;
+    const distanceFee = distanceSurcharge ? this.distanceSurchargeFee : 0;
 
     const baseData = {
       cleaningType: this.normalizeDisplayCode(obj.cleaningType),
@@ -2229,6 +2373,7 @@ export class BookingService {
       const breakdown = this.calculatePricingBreakdown(
         baseData,
         discountApplied,
+        distanceFee,
       );
       const estimatedBase = this.roundCurrency(
         breakdown.baseServicePrice + breakdown.additionalBedroomsFee,
