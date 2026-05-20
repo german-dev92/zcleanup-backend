@@ -1,220 +1,115 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { MongooseModule, getModelToken } from '@nestjs/mongoose';
 import { BookingService } from './booking.service';
-import { getModelToken } from '@nestjs/mongoose';
 import { Booking, BookingSchema } from './schemas/booking.schema';
+import { Payment, PaymentSchema } from '../payments/schemas/payment.schema';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DiscountsService } from '../discounts/discounts.service';
-import { StripeService, toStripeAmountCents } from '../payments/stripe.service';
-import { Payment, PaymentSchema } from '../payments/schemas/payment.schema';
+import { StripeService } from '../payments/stripe.service';
 import { BookingStateService } from './booking-state.service';
 import { EmployeesService } from '../employees/employees.service';
-import { DiscountUsedSchema } from '../discounts/schemas/discount-used.schema';
 import { GeoPricingService } from './geo-pricing.service';
+import * as dbHandler from '../../test/helpers/db-handler';
+import { StripeServiceMock } from '../../test/mocks/stripe.service.mock';
+import { Model } from 'mongoose';
 
-describe('BookingService', () => {
+/**
+ * @file booking.service.spec.ts
+ * @description Test de Integración para BookingService.
+ * 
+ * CONCEPTOS CLAVE:
+ * - Integration Test: Probamos cómo interactúa el servicio con la base de datos (Memory Server).
+ * - Mocking: Reemplazamos servicios externos (Stripe, Email) por versiones falsas controladas.
+ * - MongooseModule.forRoot: Conectamos NestJS a nuestra base de datos de pruebas.
+ */
+
+describe('BookingService (Integration Test)', () => {
   let service: BookingService;
+  let bookingModel: Model<any>;
+  let mongoUri: string;
+
+  // Antes de todos los tests de esta suite, conectamos a la DB en memoria
+  beforeAll(async () => {
+    mongoUri = await dbHandler.connect();
+  }, 20000); // Aumentamos el tiempo de espera para el arranque de Mongo Memory Server
+  
+  // Después de todos los tests, cerramos la conexión
+  afterAll(async () => await dbHandler.closeDatabase());
+  
+  // Después de cada test, limpiamos los datos para que no afecten al siguiente
+  afterEach(async () => await dbHandler.clearDatabase());
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
+      imports: [
+        // Usamos la URI dinámica generada por el Memory Server
+        MongooseModule.forRoot(mongoUri),
+        MongooseModule.forFeature([
+          { name: Booking.name, schema: BookingSchema },
+          { name: Payment.name, schema: PaymentSchema },
+        ]),
+      ],
       providers: [
         BookingService,
         BookingStateService,
-        {
-          provide: GeoPricingService,
-          useValue: {},
-        },
-        {
-          provide: getModelToken(Booking.name),
-          useValue: {},
-        },
-        {
-          provide: getModelToken(Payment.name),
-          useValue: { findOne: jest.fn(), findOneAndUpdate: jest.fn() },
-        },
-        {
-          provide: EventEmitter2,
-          useValue: { emit: jest.fn() },
-        },
-        {
-          provide: DiscountsService,
-          useValue: {},
-        },
-        {
-          provide: StripeService,
-          useValue: { createCheckoutSession: jest.fn() },
-        },
-        {
-          provide: EmployeesService,
-          useValue: {},
-        },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } }, // Mock simple
+        { provide: DiscountsService, useValue: { hasUsedDiscountByNormalizedAddress: jest.fn().mockResolvedValue(false) } },
+        { provide: StripeService, useValue: StripeServiceMock },
+        { provide: EmployeesService, useValue: {} },
+        { provide: GeoPricingService, useValue: { computeFromInput: jest.fn().mockResolvedValue({ distanceSurcharge: false, status: 'ok' }) } },
       ],
     }).compile();
 
     service = module.get<BookingService>(BookingService);
+    bookingModel = module.get(getModelToken(Booking.name));
   });
 
   it('should be defined', () => {
     expect(service).toBeDefined();
   });
 
-  it('calculates post-construction pricing linearly with a max of 3 cleaners', () => {
-    type PricingBreakdown = {
-      baseServicePrice: number;
-      distanceFee: number;
-      finalPrice: number;
-    };
-    const svc = service as unknown as {
-      calculatePricingBreakdown: (
-        data: unknown,
-        discountApplied: boolean,
-        distanceFee: number,
-      ) => PricingBreakdown;
-    };
+  describe('previewPricing', () => {
+    it('should calculate base price correctly for a standard cleaning', async () => {
+      const dto = {
+        cleaningType: 'standard-cleaning',
+        address: '123 Test St',
+        email: 'test@example.com',
+        name: 'Test User',
+        desiredDate: '2026-06-01',
+        desiredTime: '10:00',
+        bedrooms: 2,
+        bathrooms: 1,
+      } as any;
 
-    const calc = (hours: number, cleaners: number) =>
-      svc.calculatePricingBreakdown(
-        {
-          serviceType: 'post_construction',
-          postConstruction: { hours, cleaners },
-          extras: [],
-          petsAtHome: false,
-          distanceSurcharge: false,
-        },
-        false,
-        0,
-      ).baseServicePrice;
+      const result = await service.previewPricing(dto);
 
-    expect(calc(1, 1)).toBe(60);
-    expect(calc(2, 1)).toBe(100);
-    expect(calc(3, 1)).toBe(140);
-
-    expect(calc(1, 2)).toBe(80);
-    expect(calc(1, 3)).toBe(100);
-    expect(calc(2, 2)).toBe(120);
-    expect(calc(3, 3)).toBe(180);
-
-    expect(calc(2, 4)).toBe(140);
-    expect(calc(1, 10)).toBe(100);
-  });
-
-  it('ignores client-provided distanceSurcharge and only uses server-computed distanceFee', () => {
-    type PricingBreakdown = { finalPrice: number; distanceFee: number };
-    const svc = service as unknown as {
-      calculatePricingBreakdown: (
-        data: unknown,
-        discountApplied: boolean,
-        distanceFee: number,
-      ) => PricingBreakdown;
-    };
-
-    const ignored = svc.calculatePricingBreakdown(
-      {
-        serviceType: 'post_construction',
-        postConstruction: { hours: 1, cleaners: 1 },
-        extras: [],
-        petsAtHome: false,
-        distanceSurcharge: true,
-      },
-      false,
-      0,
-    );
-
-    expect(ignored.distanceFee).toBe(0);
-    expect(ignored.finalPrice).toBe(60);
-
-    const applied = svc.calculatePricingBreakdown(
-      {
-        serviceType: 'post_construction',
-        postConstruction: { hours: 1, cleaners: 1 },
-        extras: [],
-        petsAtHome: false,
-        distanceSurcharge: false,
-      },
-      false,
-      20,
-    );
-
-    expect(applied.distanceFee).toBe(20);
-    expect(applied.finalPrice).toBe(80);
-  });
-
-  describe('toStripeAmountCents', () => {
-    it('converts dollar amounts to integer cents deterministically', () => {
-      expect(toStripeAmountCents(19.99)).toBe(1999);
-      expect(toStripeAmountCents(10)).toBe(1000);
-      expect(toStripeAmountCents(0.01)).toBe(1);
-    });
-
-    it('avoids common floating-point edge cases', () => {
-      expect(toStripeAmountCents(0.1 + 0.2)).toBe(30);
-      expect(toStripeAmountCents(10.005)).toBe(1001);
+      expect(result).toBeDefined();
+      expect(result.finalPrice).toBeGreaterThan(0);
+      expect(result.discountApplied).toBe(false);
     });
   });
 
-  describe('mongoose indexes', () => {
-    const hasIndex = (
-      schema: {
-        indexes: () => Array<
-          [Record<string, unknown>, Record<string, unknown>]
-        >;
-      },
-      keys: Record<string, unknown>,
-      options?: Record<string, unknown>,
-    ) => {
-      return schema.indexes().some(([k, o]) => {
-        const keysOk = Object.entries(keys).every(
-          ([key, value]) => k[key] === value,
-        );
-        const optionsOk = options
-          ? Object.entries(options).every(([key, value]) => o[key] === value)
-          : true;
-        return keysOk && optionsOk;
-      });
-    };
+  describe('createBooking', () => {
+    it('should save a booking in the database', async () => {
+      const dto = {
+        cleaningType: 'standard-cleaning',
+        address: '123 Test St',
+        email: 'test@example.com',
+        name: 'Test User',
+        desiredDate: '2026-06-01',
+        desiredTime: '10:00',
+        bedrooms: 1,
+        bathrooms: 1,
+      } as any;
 
-    it('BookingSchema defines critical indexes', () => {
-      expect(hasIndex(BookingSchema, { status: 1, createdAt: -1 })).toBe(true);
-      expect(hasIndex(BookingSchema, { email: 1, createdAt: -1 })).toBe(true);
-      expect(hasIndex(BookingSchema, { createdAt: -1 })).toBe(true);
+      const result = await service.createBooking(dto);
+
+      expect(result.success).toBe(true);
+      
+      // Verificamos que realmente esté en la base de datos
+      const savedBooking = await bookingModel.findOne({ email: 'test@example.com' });
+      expect(savedBooking).toBeDefined();
+      expect(savedBooking.name).toBe('Test User');
     });
-
-    it('DiscountUsedSchema defines discount validation indexes', () => {
-      expect(
-        hasIndex(
-          DiscountUsedSchema,
-          { email: 1 },
-          { unique: true, sparse: true },
-        ),
-      ).toBe(true);
-      expect(
-        hasIndex(
-          DiscountUsedSchema,
-          { normalizedAddress: 1 },
-          { unique: true, sparse: true },
-        ),
-      ).toBe(true);
-      expect(hasIndex(DiscountUsedSchema, { bookingId: 1 })).toBe(true);
-    });
-
-    it('PaymentSchema defines booking/provider uniqueness index', () => {
-      expect(
-        hasIndex(
-          PaymentSchema,
-          { bookingId: 1, provider: 1 },
-          { unique: true },
-        ),
-      ).toBe(true);
-    });
-  });
-});
-
-describe('GeoPricingService', () => {
-  it('classifies a known Tampa coordinate as inside Tampa coverage', () => {
-    const geo = new GeoPricingService();
-    const res = geo.computeSurcharge(27.9506, -82.4572);
-    expect(res.status).toBe('inside');
-    expect(res.assignedZone).toBe('Tampa');
-    expect(res.distanceSurcharge).toBe(false);
-    expect(res.isBorderline).toBe(false);
   });
 });

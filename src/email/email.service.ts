@@ -9,6 +9,11 @@ import type {
   EmailAttachment,
 } from './email.builder';
 
+/**
+ * @class EmailService
+ * @description Servicio para el envío de correos electrónicos.
+ * Utiliza Nodemailer con Gmail y un constructor de plantillas dinámico.
+ */
 @Injectable()
 export class EmailService {
   private transporter: Transporter;
@@ -24,9 +29,11 @@ export class EmailService {
     });
   }
 
-  // -----------------------------
-  // ENTRY POINT
-  // -----------------------------
+  /**
+   * Envía un correo electrónico de creación de reserva.
+   * @param booking Datos de la reserva para incluir en la plantilla.
+   * @returns Promesa con el resultado del envío.
+   */
   async sendBookingEmail(booking: BookingEmailPayload): Promise<unknown> {
     return this.sendBookingEventEmail({
       eventType: 'booking.created',
@@ -34,9 +41,13 @@ export class EmailService {
     });
   }
 
-  // -----------------------------
-  // MAIN DISPATCHER
-  // -----------------------------
+  /**
+   * Despachador principal para correos relacionados con eventos de reserva.
+   * Construye el correo usando el EmailBuilder y lo envía mediante el transportador configurado.
+   * @param params Parámetros del evento, datos de la reserva y adjuntos opcionales.
+   * @returns Promesa con el resultado del envío de Nodemailer.
+   * @throws Error si falta el email del destinatario en los datos de la reserva.
+   */
   async sendBookingEventEmail(params: {
     eventType: BookingEventType;
     booking: BookingEmailPayload;

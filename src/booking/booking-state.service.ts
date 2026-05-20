@@ -7,8 +7,19 @@ import type { BookingStatus } from './types/booking-status';
 
 export type BookingTransitionSource = 'admin' | 'employee' | 'webhook';
 
+/**
+ * @class BookingStateService
+ * @description Servicio encargado de gestionar las transiciones de estado de las reservas.
+ * Implementa una máquina de estados para asegurar que las reservas sigan un flujo lógico y permitido.
+ */
 @Injectable()
 export class BookingStateService {
+  /**
+   * Determina si una transición de estado es válida.
+   * @param from Estado actual de la reserva.
+   * @param to Estado destino deseado.
+   * @returns Verdadero si la transición es permitida, falso de lo contrario.
+   */
   canTransition(from: BookingStatus, to: BookingStatus): boolean {
     if (from === to) return true;
 
@@ -39,6 +50,13 @@ export class BookingStateService {
     return false;
   }
 
+  /**
+   * Ejecuta la transición de estado de una reserva, validando permisos según el origen.
+   * @param params Parámetros de la transición: estado actual, siguiente y origen del cambio.
+   * @returns El nuevo estado de la reserva si la transición es exitosa.
+   * @throws BadRequestException si la transición no es válida lógicamente.
+   * @throws ForbiddenException si el origen no tiene permisos para realizar la transición.
+   */
   transitionBooking(params: {
     current: BookingStatus;
     next: BookingStatus;

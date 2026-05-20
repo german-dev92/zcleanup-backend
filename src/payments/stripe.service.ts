@@ -17,10 +17,20 @@ export type StripeCheckoutSessionDetails = {
   paymentIntentId: string | null;
 };
 
+/**
+ * @class StripeService
+ * @description Servicio de integración con la API de Stripe para el procesamiento de pagos.
+ * Maneja la creación de sesiones de Checkout y la validación de firmas de webhooks.
+ */
 @Injectable()
 export class StripeService {
   private stripe: StripeClient | null = null;
 
+  /**
+   * Inicializa o devuelve la instancia del cliente de Stripe.
+   * @returns Cliente de Stripe configurado con la clave secreta.
+   * @throws InternalServerErrorException si la clave de Stripe no está configurada.
+   */
   private getStripe(): StripeClient {
     if (this.stripe) {
       return this.stripe;
@@ -35,6 +45,14 @@ export class StripeService {
     return this.stripe;
   }
 
+  /**
+   * Construye un evento de Stripe a partir del payload del webhook y la firma.
+   * Valida la autenticidad de la notificación recibida.
+   * @param payload Cuerpo bruto de la solicitud del webhook.
+   * @param signature Firma enviada por Stripe en las cabeceras.
+   * @returns El evento de Stripe validado.
+   * @throws InternalServerErrorException si el secreto del webhook no está configurado.
+   */
   constructWebhookEvent(payload: Buffer, signature: string): unknown {
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
     if (!webhookSecret) {
@@ -46,11 +64,23 @@ export class StripeService {
     return stripe.webhooks.constructEvent(payload, signature, webhookSecret);
   }
 
+  /**
+   * Crea una sesión de Checkout de Stripe y devuelve la URL de redirección.
+   * @param booking Documento de la reserva asociada al pago.
+   * @returns URL de la página de pago de Stripe.
+   */
   async createCheckoutSession(booking: BookingDocument): Promise<string> {
     const details = await this.createCheckoutSessionDetails(booking);
     return details.url;
   }
 
+  /**
+   * Crea una sesión de Checkout de Stripe con detalles completos.
+   * Configura URLs de éxito/cancelación, metadatos y línea de ítem del servicio.
+   * @param booking Documento de la reserva.
+   * @returns Detalles de la sesión creada incluyendo ID, URL y ID de PaymentIntent.
+   * @throws InternalServerErrorException si el precio es inválido o no se recibe URL de sesión.
+   */
   async createCheckoutSessionDetails(
     booking: BookingDocument,
   ): Promise<StripeCheckoutSessionDetails> {

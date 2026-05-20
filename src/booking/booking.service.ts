@@ -26,10 +26,21 @@ import type { AuthUser } from '../auth/auth.types';
 import { UserRole } from '../auth/roles.enum';
 import { GeoPricingService } from './geo-pricing.service';
 
+/**
+ * @class BookingService
+ * @description Servicio central para la gestión de reservas.
+ * Implementa la lógica de negocio para:
+ * - Cálculo de precios (Pricing engine) con soporte para extras, mascotas y recargos por distancia.
+ * - Verificación de elegibilidad para descuentos (First-time customer).
+ * - Integración con GeoPricing para validación de cobertura geográfica.
+ * - Creación y actualización de reservas con soporte para transacciones lógicas (rollback de descuentos).
+ * - Orquestación de estados de reserva y disparadores de eventos.
+ */
 @Injectable()
 export class BookingService {
   private readonly logger = new Logger(BookingService.name);
 
+  /** Tarifa fija por recargo de distancia fuera de zona base */
   private readonly distanceSurchargeFee = 20;
 
   constructor(
@@ -45,6 +56,12 @@ export class BookingService {
     private geoPricingService: GeoPricingService,
   ) {}
 
+  /**
+   * Genera una previsualización detallada del precio basada en la entrada del usuario.
+   * No persiste datos en la base de datos principal de reservas.
+   * @param data DTO con los datos de la reserva para el cálculo.
+   * @returns Desglose de precios, estado de cobertura y elegibilidad de descuento.
+   */
   async previewPricing(data: CreateBookingDto) {
     const wantsDiscountRequested = data.applyFirstDiscount === true;
 
@@ -169,6 +186,15 @@ export class BookingService {
     };
   }
 
+  /**
+   * Crea una nueva reserva en el sistema.
+   * Valida horarios, calcula el precio final (server-side truth), verifica duplicados recientes,
+   * procesa descuentos y dispara eventos de notificación.
+   * @param data Datos de la reserva.
+   * @returns Resultado de la creación con el snapshot del precio final.
+   * @throws BadRequestException si los datos son inválidos o el horario no es permitido.
+   * @throws ConflictException si el descuento ya fue usado o hay un duplicado.
+   */
   async createBooking(data: CreateBookingDto) {
     try {
       data.email = this.normalizeEmail(data.email);

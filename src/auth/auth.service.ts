@@ -13,6 +13,11 @@ type JwtPayload = {
   role: AuthRole;
 };
 
+/**
+ * @class AuthService
+ * @description Servicio encargado de la lógica de autenticación y generación de tokens JWT.
+ * Realiza la validación de credenciales contra la base de datos de usuarios y la gestión de roles.
+ */
 @Injectable()
 export class AuthService {
   constructor(
@@ -20,6 +25,14 @@ export class AuthService {
     private readonly jwtService: JwtService,
   ) {}
 
+  /**
+   * Procesa la solicitud de inicio de sesión.
+   * Verifica la existencia del usuario, si está activo y si la contraseña coincide.
+   * @param emailRaw Email proporcionado por el usuario.
+   * @param passwordRaw Contraseña proporcionada por el usuario.
+   * @returns Objeto con el token JWT y datos del usuario.
+   * @throws UnauthorizedException si las credenciales son inválidas o el usuario no está activo.
+   */
   async login(
     emailRaw: string,
     passwordRaw: string,

@@ -497,6 +497,11 @@ class PricePreviewDto {
   windowCleaning?: Record<string, any>;
 }
 
+/**
+ * @controller BookingController
+ * @description Controlador para la gestión de reservas de limpieza.
+ * Expone endpoints para crear, consultar, previsualizar precios y gestionar el ciclo de vida de una reserva.
+ */
 @Controller('booking')
 @ApiTags('booking')
 export class BookingController {
@@ -504,6 +509,12 @@ export class BookingController {
 
   constructor(private readonly bookingService: BookingService) {}
 
+  /**
+   * Obtiene la lista de reservas filtradas opcionalmente por estado.
+   * Requiere rol de Administrador o Supervisor.
+   * @param query Objeto de consulta que incluye el estado de la reserva.
+   * @returns Lista de resúmenes de reservas.
+   */
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPERVISOR)
@@ -517,6 +528,11 @@ export class BookingController {
     return this.bookingService.getBookings(query.status);
   }
 
+  /**
+   * Obtiene las reservas asignadas al empleado autenticado.
+   * @param req Solicitud HTTP que contiene el usuario autenticado.
+   * @returns Lista de reservas asignadas al empleado.
+   */
   @Get('assigned')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.EMPLOYEE)
@@ -525,6 +541,12 @@ export class BookingController {
     return this.bookingService.getAssignedBookings(req.user);
   }
 
+  /**
+   * Obtiene una reserva específica por su ID.
+   * Requiere rol de Administrador o Supervisor.
+   * @param id ID de la reserva.
+   * @returns Resumen de la reserva encontrada.
+   */
   @Get(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPERVISOR)
@@ -533,6 +555,12 @@ export class BookingController {
     return this.bookingService.getById(id);
   }
 
+  /**
+   * Calcula una previsualización del precio sin crear la reserva.
+   * Útil para el formulario de reserva dinámico en el frontend.
+   * @param body Datos necesarios para el cálculo del precio.
+   * @returns Desglose detallado del precio estimado.
+   */
   @Post('price-preview')
   @ApiBody({ type: PricePreviewDto })
   @ApiOkResponse({ type: PricePreviewResponseDto })
@@ -542,6 +570,11 @@ export class BookingController {
     );
   }
 
+  /**
+   * Crea una nueva reserva.
+   * @param body Datos de la reserva a crear.
+   * @returns Resultado de la creación y snapshot del precio.
+   */
   @Post()
   @ApiBody({ type: CreateBookingDto })
   @ApiCreatedResponse({ type: CreateBookingResponseDto })
@@ -549,6 +582,13 @@ export class BookingController {
     return this.bookingService.createBooking(body);
   }
 
+  /**
+   * Actualiza el estado de una reserva (ej. de pending a confirmed).
+   * Requiere rol de Administrador.
+   * @param id ID de la reserva.
+   * @param body Nuevo estado deseado.
+   * @returns Respuesta con la reserva actualizada.
+   */
   @Patch(':id/status')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
