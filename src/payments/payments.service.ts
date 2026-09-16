@@ -9,6 +9,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model } from 'mongoose';
 import {
   Booking,
+  type BookingCommercialStatus,
   type BookingDocument,
 } from '../booking/schemas/booking.schema';
 import { Payment, type PaymentDocument } from './schemas/payment.schema';
@@ -60,9 +61,7 @@ export class PaymentsService {
       }
     }
 
-    if (booking.status !== 'confirmed') {
-      throw new BadRequestException('Booking must be confirmed before payment');
-    }
+    const paymentContext = this.resolvePaymentContext(booking);
 
     const existingUrl =
       typeof booking.paymentUrl === 'string' ? booking.paymentUrl.trim() : '';
@@ -70,14 +69,7 @@ export class PaymentsService {
       return existingUrl;
     }
 
-    const expectedAmount = booking.finalPricePreview;
-    if (
-      typeof expectedAmount !== 'number' ||
-      !Number.isFinite(expectedAmount) ||
-      expectedAmount <= 0
-    ) {
-      throw new BadRequestException('Invalid booking price');
-    }
+    const expectedAmount = paymentContext.expectedAmount;
     const expectedAmountCents = toStripeAmountCents(expectedAmount);
     if (
       !Number.isSafeInteger(expectedAmountCents) ||
@@ -98,8 +90,14 @@ export class PaymentsService {
       throw new BadRequestException('Payment amount mismatch');
     }
 
-    const details =
-      await this.stripeService.createCheckoutSessionDetails(booking);
+    const details = await this.stripeService.createCheckoutSessionDetails(
+      booking,
+      {
+        amount: expectedAmount,
+        quoteVersion: paymentContext.quoteVersion,
+        quotedAmount: paymentContext.quotedAmount,
+      },
+    );
 
     const currency = details.currency ?? 'usd';
     const amountTotalCents =
@@ -134,8 +132,99 @@ export class PaymentsService {
     }
 
     booking.paymentUrl = details.url;
+    if (paymentContext.mode === 'quote_flow') {
+      booking.paymentLifecycleStatus = 'checkout_created';
+    }
     await booking.save();
 
     return details.url;
+  }
+
+  /**
+   * Decide si el booking debe pagarse con reglas legacy o con reglas del nuevo
+   * quote-flow y devuelve el monto exacto que Stripe debe cobrar.
+   *
+   * COMPATIBILIDAD:
+   * - Legacy: conserva la regla actual `status === confirmed` y usa
+   *   `finalPricePreview`.
+   * - Quote-flow: exige `quote_accepted + invoice_ready + finalQuotedPrice`.
+   */
+  private resolvePaymentContext(booking: BookingDocument): {
+    mode: 'legacy' | 'quote_flow';
+    expectedAmount: number;
+    quoteVersion: string;
+    quotedAmount: string;
+  } {
+    const commercialStatus = this.readCommercialStatus(booking);
+    const isQuoteFlow =
+      commercialStatus !== null && commercialStatus !== 'legacy_direct_booking';
+
+    if (!isQuoteFlow) {
+      if (booking.status !== 'confirmed') {
+        throw new BadRequestException(
+          'Booking must be confirmed before payment',
+        );
+      }
+
+      const expectedAmount = this.ensurePositiveAmount(
+        booking.finalPricePreview,
+        'Invalid booking price',
+      );
+      return {
+        mode: 'legacy',
+        expectedAmount,
+        quoteVersion: 'legacy',
+        quotedAmount: expectedAmount.toFixed(2),
+      };
+    }
+
+    if (commercialStatus !== 'quote_accepted') {
+      throw new BadRequestException(
+        'Booking quote must be accepted before payment',
+      );
+    }
+
+    if (booking.paymentLifecycleStatus !== 'invoice_ready') {
+      throw new BadRequestException(
+        'Booking invoice must be ready before payment',
+      );
+    }
+
+    const quote =
+      booking.quote && typeof booking.quote === 'object'
+        ? (booking.quote as unknown as Record<string, unknown>)
+        : null;
+    const expectedAmount = this.ensurePositiveAmount(
+      quote?.finalQuotedPrice,
+      'Invalid quoted price',
+    );
+    const quoteVersion =
+      typeof quote?.version === 'number' &&
+      Number.isFinite(quote.version) &&
+      quote.version > 0
+        ? String(quote.version)
+        : '0';
+
+    return {
+      mode: 'quote_flow',
+      expectedAmount,
+      quoteVersion,
+      quotedAmount: expectedAmount.toFixed(2),
+    };
+  }
+
+  private readCommercialStatus(
+    booking: BookingDocument,
+  ): BookingCommercialStatus | null {
+    return typeof booking.commercialStatus === 'string'
+      ? booking.commercialStatus
+      : null;
+  }
+
+  private ensurePositiveAmount(value: unknown, errorMessage: string): number {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      throw new BadRequestException(errorMessage);
+    }
+    return value;
   }
 }

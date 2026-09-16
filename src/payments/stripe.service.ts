@@ -18,6 +18,20 @@ export type StripeCheckoutSessionDetails = {
 };
 
 /**
+ * Contexto calculado por la capa de pagos antes de pedir a Stripe una sesión.
+ *
+ * POR QUÉ EXISTE:
+ * - Permite que Stripe reciba metadatos consistentes tanto para legacy-flow
+ *   como para quote-flow.
+ * - Evita recalcular reglas de negocio dentro de StripeService.
+ */
+export type StripeCheckoutSessionContext = {
+  amount: number;
+  quoteVersion: string;
+  quotedAmount: string;
+};
+
+/**
  * @class StripeService
  * @description Servicio de integración con la API de Stripe para el procesamiento de pagos.
  * Maneja la creación de sesiones de Checkout y la validación de firmas de webhooks.
@@ -83,8 +97,9 @@ export class StripeService {
    */
   async createCheckoutSessionDetails(
     booking: BookingDocument,
+    context?: StripeCheckoutSessionContext,
   ): Promise<StripeCheckoutSessionDetails> {
-    const price = booking.finalPricePreview;
+    const price = context?.amount ?? booking.finalPricePreview;
     const isValidPrice =
       typeof price === 'number' && Number.isFinite(price) && price > 0;
     if (!isValidPrice) {
@@ -118,6 +133,8 @@ export class StripeService {
       customer_email: booking.email,
       metadata: {
         bookingId: String(booking._id),
+        quoteVersion: context?.quoteVersion ?? 'legacy',
+        quotedAmount: context?.quotedAmount ?? String(price),
       },
       line_items: [
         {

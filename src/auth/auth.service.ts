@@ -88,6 +88,51 @@ export class AuthService {
     };
   }
 
+  /**
+   * Verify that an email + password pair is valid against the Users collection
+   * WITHOUT issuing a JWT. Used for re-authentication before destructive admin actions
+   * like permanent booking deletion (never compare plaintext; bcrypt used here).
+   *
+   * Returns the verified user document snapshot (id, email, role) on success;
+   * throws UnauthorizedException if missing/inactive/bad credentials.
+   */
+  async verifyCredentialsOnly(
+    emailRaw: string,
+    passwordRaw: string,
+  ): Promise<{ id: string; email: string; role: AuthRole }> {
+    const email = String(emailRaw ?? '').toLowerCase().trim();
+    const password = String(passwordRaw ?? '');
+
+    if (!email || !password) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const user = await this.users.findOne({ email });
+    if (!user || user.active === false) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    if (typeof user.passwordHash !== 'string' || !user.passwordHash.trim()) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    let ok = false;
+    try {
+      ok = await bcrypt.compare(password, user.passwordHash);
+    } catch {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+    if (!ok) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    return {
+      id: String(user._id),
+      email: user.email,
+      role: this.coerceRole((user as unknown as { role?: unknown }).role),
+    };
+  }
+
   private coerceRole(value: unknown): AuthRole {
     if (value === UserRole.ADMIN) return UserRole.ADMIN;
     if (value === UserRole.SUPERVISOR) return UserRole.SUPERVISOR;

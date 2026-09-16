@@ -29,6 +29,76 @@ export class EmailListener {
     await this.handleEvent('booking.cancelled', payload);
   }
 
+  @OnEvent('booking.quote_requested')
+  async onBookingQuoteRequested(payload: unknown) {
+    await this.handleEvent('booking.quote_requested', payload);
+  }
+
+  @OnEvent('booking.payment_received')
+  async onBookingPaymentReceived(payload: unknown) {
+    await this.handleEvent('booking.payment_received', payload);
+  }
+
+  // -------------------------
+  // INTERNAL EVENTS (NO EMAIL — per workflow: only Confirm Booking emails customer)
+  //
+  // The following are internal audit/commercial lifecycle events only. They
+  // intentionally do NOT send a customer-visible transactional email because
+  // the business workflow specifies:
+  //   - Booking submission              → 1 booking-received email
+  //   - Discount / quote changes        → NO customer email
+  //   - Quote sent/revised/rejected etc → NO customer email
+  //   - Confirm Booking                 → 1 official invoice/payment email
+  //   - Payment completion              → existing payment confirmation flow
+  // -------------------------
+  @OnEvent('booking.quote_sent')
+  onBookingQuoteSentInternalOnly(payload: unknown): void {
+    const booking = (payload ?? {}) as Record<string, unknown>;
+    const bookingId =
+      typeof (booking as { bookingId?: unknown }).bookingId === 'string'
+        ? String((booking as { bookingId: string }).bookingId)
+        : 'unknown';
+    this.logger.log(
+      `[LIFECYCLE] booking.quote_sent (internal, no email) → ${bookingId}`,
+    );
+  }
+
+  @OnEvent('booking.quote_accepted')
+  onBookingQuoteAcceptedInternalOnly(payload: unknown): void {
+    const booking = (payload ?? {}) as Record<string, unknown>;
+    const bookingId =
+      typeof (booking as { bookingId?: unknown }).bookingId === 'string'
+        ? String((booking as { bookingId: string }).bookingId)
+        : 'unknown';
+    this.logger.log(
+      `[LIFECYCLE] booking.quote_accepted (internal, no email) → ${bookingId}`,
+    );
+  }
+
+  @OnEvent('booking.quote_rejected')
+  onBookingQuoteRejectedInternalOnly(payload: unknown): void {
+    const booking = (payload ?? {}) as Record<string, unknown>;
+    const bookingId =
+      typeof (booking as { bookingId?: unknown }).bookingId === 'string'
+        ? String((booking as { bookingId: string }).bookingId)
+        : 'unknown';
+    this.logger.log(
+      `[LIFECYCLE] booking.quote_rejected (internal, no email) → ${bookingId}`,
+    );
+  }
+
+  @OnEvent('booking.invoice_ready')
+  onBookingInvoiceReadyInternalOnly(payload: unknown): void {
+    const booking = (payload ?? {}) as Record<string, unknown>;
+    const bookingId =
+      typeof (booking as { bookingId?: unknown }).bookingId === 'string'
+        ? String((booking as { bookingId: string }).bookingId)
+        : 'unknown';
+    this.logger.log(
+      `[LIFECYCLE] booking.invoice_ready (internal, no email) → ${bookingId}`,
+    );
+  }
+
   // -------------------------
   // CORE HANDLER
   // -------------------------

@@ -206,8 +206,26 @@ export class CreateBookingDto {
   petsAtHome?: boolean;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(1200)
+  petSafetyNotes?: string;
+
+  @IsOptional()
   @IsBoolean()
   useOwnProducts?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  usesOwnCleaningProducts?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1200)
+  cleaningProductNotes?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  firstServiceDiscountRequested?: boolean;
 
   @IsOptional()
   @IsBoolean()
@@ -279,6 +297,35 @@ export class CreateBookingDto {
   @ArrayMaxSize(20)
   @IsExtrasArray()
   extras?: any[];
+
+  // ======================
+  // 🔹 V2 NEW MODEL – Optional (backwards compatible con V1)
+  // ======================
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  pricingModelVersion?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  specialServiceId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  regularCleaningPackageId?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  borderlineFee?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  coverageClassification?: string;
 
   // ======================
   // 🔹 PRICING SNAPSHOT

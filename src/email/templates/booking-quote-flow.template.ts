@@ -1,19 +1,50 @@
 import { type BookingEmailTemplateViewModel } from '../email.builder';
 
-export function buildBookingCancelledTemplate(
+/**
+ * Plantilla genérica para el nuevo flujo comercial de cotización.
+ *
+ * POR QUÉ EXISTE:
+ * - El flujo quote-flow introduce varios eventos cercanos entre sí
+ *   (`quote_sent`, `invoice_ready`, `payment_received`, etc.).
+ * - Reutilizar una misma estructura visual reduce riesgo de inconsistencias
+ *   entre emails y simplifica mantenimiento.
+ */
+export function buildBookingQuoteFlowTemplate(
   model: BookingEmailTemplateViewModel,
 ): string {
   const supportEmail = process.env.EMAIL_USER ?? 'support@zcleanup.com';
   const logoUrl =
     'https://res.cloudinary.com/dbjmebbfw/image/upload/q_auto/f_auto/v1776476300/ZcleanUP_qc0dn3.png';
 
-  const paymentButton = model.paymentUrl
-    ? `
+  const ctaButton =
+    model.ctaUrl && model.ctaLabel
+      ? `
       <tr>
         <td align="center" style="padding: 12px 0 0;">
           <table role="presentation" cellpadding="0" cellspacing="0" border="0">
             <tr>
               <td bgcolor="#3498db" style="border-radius: 6px;">
+                <a href="${model.ctaUrl}" target="_blank" rel="noopener noreferrer" style="display: inline-block; padding: 12px 20px; font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #ffffff; text-decoration: none; border-radius: 6px;">
+                  ${model.ctaLabel}
+                </a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    `
+      : '';
+
+  const paymentButton =
+    model.paymentUrl &&
+    model.paymentUrl !== model.ctaUrl &&
+    model.paymentUrl.trim().length > 0
+      ? `
+      <tr>
+        <td align="center" style="padding: 12px 0 0;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+            <tr>
+              <td bgcolor="#16a34a" style="border-radius: 6px;">
                 <a href="${model.paymentUrl}" target="_blank" rel="noopener noreferrer" style="display: inline-block; padding: 12px 20px; font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #ffffff; text-decoration: none; border-radius: 6px;">
                   Complete Payment
                 </a>
@@ -23,44 +54,6 @@ export function buildBookingCancelledTemplate(
         </td>
       </tr>
     `
-    : '';
-
-  const trackingButton = model.trackingUrl
-    ? `
-      <tr>
-        <td align="center" style="padding: 12px 0 0;">
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0">
-            <tr>
-              <td bgcolor="#3498db" style="border-radius: 6px;">
-                <a href="${model.trackingUrl}" target="_blank" rel="noopener noreferrer" style="display: inline-block; padding: 12px 20px; font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #ffffff; text-decoration: none; border-radius: 6px;">
-                  Track Booking
-                </a>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    `
-    : '';
-
-  const actionSection =
-    paymentButton || trackingButton
-      ? `
-        <tr>
-          <td style="padding: 0 24px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
-              <tr>
-                <td style="padding: 16px 0 22px;">
-                  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-                    ${paymentButton}
-                    ${trackingButton}
-                  </table>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-      `
       : '';
 
   const buildKeyValueRows = (rows: Array<{ label: string; value: string }>) =>
@@ -90,21 +83,10 @@ export function buildBookingCancelledTemplate(
     ? buildKeyValueRows(model.propertyRows)
     : buildKeyValueRows([{ label: 'Property', value: 'N/A' }]);
 
-  const extrasList = Array.isArray(model.extrasList) ? model.extrasList : [];
   const extrasHtml =
-    extrasList.length > 0
+    Array.isArray(model.extrasList) && model.extrasList.length > 0
       ? `<ul style="margin: 8px 0 0; padding: 0 0 0 18px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827;">
-          ${extrasList.map((x) => `<li style="margin: 4px 0;">${x}</li>`).join('')}
-        </ul>`
-      : `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #6b7280;">None</div>`;
-
-  const conditionsList = Array.isArray(model.specialConditions)
-    ? model.specialConditions
-    : [];
-  const conditionsHtml =
-    conditionsList.length > 0
-      ? `<ul style="margin: 8px 0 0; padding: 0 0 0 18px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827;">
-          ${conditionsList.map((x) => `<li style="margin: 4px 0;">${x}</li>`).join('')}
+          ${model.extrasList.map((x) => `<li style="margin: 4px 0;">${x}</li>`).join('')}
         </ul>`
       : `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #6b7280;">None</div>`;
 
@@ -115,10 +97,16 @@ export function buildBookingCancelledTemplate(
       ? `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827; white-space: pre-wrap; line-height: 1.5;">${notesText}</div>`
       : `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #6b7280;">None</div>`;
 
-  const pricingRows = Array.isArray(model.pricingRows) ? model.pricingRows : [];
+  const conditionsHtml =
+    Array.isArray(model.specialConditions) && model.specialConditions.length > 0
+      ? `<ul style="margin: 8px 0 0; padding: 0 0 0 18px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827;">
+          ${model.specialConditions.map((x) => `<li style="margin: 4px 0;">${x}</li>`).join('')}
+        </ul>`
+      : `<div style="margin-top: 8px; font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #6b7280;">None</div>`;
+
   const pricingRowsHtml =
-    pricingRows.length > 0
-      ? pricingRows
+    Array.isArray(model.pricingRows) && model.pricingRows.length > 0
+      ? model.pricingRows
           .map((row) => {
             const border = row.isTotal ? '0' : '1px solid #eef2f7';
             const color = row.isTotal ? '#111827' : '#334155';
@@ -139,6 +127,26 @@ export function buildBookingCancelledTemplate(
           <td align="right" style="padding: 10px 0; font-family: Arial, Helvetica, sans-serif; font-size: 16px; font-weight: 900; color: #111827;">-</td>
         </tr>
       `;
+
+  const actionSection =
+    ctaButton || paymentButton
+      ? `
+        <tr>
+          <td style="padding: 0 24px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
+              <tr>
+                <td style="padding: 16px 0 22px;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                    ${ctaButton}
+                    ${paymentButton}
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      `
+      : '';
 
   return `
   <html lang="en">
@@ -176,7 +184,7 @@ export function buildBookingCancelledTemplate(
                     <tr>
                       <td style="padding: 24px 24px 10px;">
                         <div style="font-family: Arial, Helvetica, sans-serif; font-size: 26px; font-weight: 800; color: #2c3e50; line-height: 1.2;">
-                          Booking Cancelled
+                          ${model.heading}
                         </div>
                         <div style="width: 40px; height: 3px; background: #e67e22; border-radius: 3px; margin-top: 10px;"></div>
                         <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #6b7280; line-height: 1.5; margin-top: 6px;">
@@ -255,7 +263,7 @@ export function buildBookingCancelledTemplate(
                           <tr>
                             <td style="padding: 16px 0 22px;">
                               <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
-                                Pricing Breakdown
+                                Pricing Summary
                               </div>
                               <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background: #f8fafc; border-radius: 8px; margin-top: 10px;">
                                 <tr>

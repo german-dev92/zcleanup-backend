@@ -84,4 +84,36 @@ export class EmailService {
 
     return result;
   }
+
+  async sendRawEmail(params: {
+    to?: string;
+    subject: string;
+    text?: string;
+    html?: string;
+    attachments?: EmailAttachment[];
+    replyTo?: string;
+  }): Promise<unknown> {
+    const toEmail = params.to ?? process.env.EMAIL_USER;
+    const result = await this.transporter.sendMail({
+      from: `"Your ZCLEANUP Team" <${process.env.EMAIL_USER}>`,
+      to: toEmail,
+      replyTo: params.replyTo,
+      subject: params.subject,
+      text: params.text,
+      html: params.html,
+      attachments: params.attachments,
+    });
+    const messageId =
+      typeof result === 'object' && result !== null && 'messageId' in result
+        ? (result as { messageId?: unknown }).messageId
+        : undefined;
+    this.logger.log(
+      JSON.stringify({
+        event: 'email.raw.sent',
+        subject: params.subject,
+        messageId,
+      }),
+    );
+    return result;
+  }
 }

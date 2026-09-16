@@ -13,14 +13,85 @@ export class DiscountsService implements OnModuleInit {
     private discountModel: Model<DiscountUsed>,
   ) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     const nodeEnv =
       typeof process.env.NODE_ENV === 'string' ? process.env.NODE_ENV : '';
-    if (nodeEnv === 'production') {
+    const isProd = nodeEnv === 'production';
+
+    try {
+      const indexes = await this.discountModel.collection.indexes();
+
+      const hasNormalizedAddressUnique = indexes.some((idx) => {
+        const key = (idx as { key?: Record<string, unknown> }).key;
+        const hasCorrectKey =
+          !!key &&
+          typeof key === 'object' &&
+          'normalizedAddress' in key &&
+          (key as Record<string, unknown>).normalizedAddress === 1;
+        const isUnique = (idx as { unique?: boolean }).unique === true;
+        const isSparse =
+          (idx as { sparse?: boolean }).sparse === true || isUnique;
+        return hasCorrectKey && isUnique && isSparse;
+      });
+
+      const hasEmailUnique = indexes.some((idx) => {
+        const key = (idx as { key?: Record<string, unknown> }).key;
+        const hasCorrectKey =
+          !!key &&
+          typeof key === 'object' &&
+          'email' in key &&
+          (key as Record<string, unknown>).email === 1;
+        const isUnique = (idx as { unique?: boolean }).unique === true;
+        const isSparse =
+          (idx as { sparse?: boolean }).sparse === true || isUnique;
+        return hasCorrectKey && isUnique && isSparse;
+      });
+
+      if (!hasNormalizedAddressUnique || !hasEmailUnique) {
+        this.logger.warn(
+          JSON.stringify({
+            event: 'discount.index_migration_required',
+            indexes: {
+              normalizedAddress_unique: hasNormalizedAddressUnique
+                ? 'ok'
+                : 'missing_or_invalid',
+              email_unique: hasEmailUnique ? 'ok' : 'missing_or_invalid',
+            },
+            remediation:
+              'Run `npm run migrate:indexes` or set MONGO_ENSURE_INDEXES_ON_STARTUP=true once on next deploy. Both indexes must be unique+sparse.',
+          }),
+        );
+      } else if (isProd) {
+        this.logger.log(
+          JSON.stringify({
+            event: 'discount.indexes_verified',
+            indexes: {
+              normalizedAddress_unique: 'ok',
+              email_unique: 'ok',
+              bookingId_1: indexes.some((idx) => {
+                const key = (idx as { key?: Record<string, unknown> }).key;
+                return (
+                  !!key &&
+                  typeof key === 'object' &&
+                  'bookingId' in key &&
+                  (key as Record<string, unknown>).bookingId === 1
+                );
+              })
+                ? 'ok'
+                : 'absent',
+            },
+          }),
+        );
+      }
+    } catch (error) {
+      const message =
+        typeof error === 'object' && error !== null && 'message' in error
+          ? String((error as { message?: unknown }).message)
+          : 'unknown';
       this.logger.warn(
         JSON.stringify({
-          event: 'discount.index_migration_required',
-          index: 'normalizedAddress_unique',
+          event: 'discount.index_check_skipped',
+          reason: message,
         }),
       );
     }

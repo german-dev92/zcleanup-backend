@@ -6,10 +6,16 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model } from 'mongoose';
-import { Booking, BookingDocument } from './schemas/booking.schema';
+import {
+  Booking,
+  BookingCommercialStatus,
+  BookingDocument,
+  type AdminQuoteDiscountType,
+} from './schemas/booking.schema';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DiscountsService } from '../discounts/discounts.service';
@@ -25,6 +31,26 @@ import { EmployeesService } from '../employees/employees.service';
 import type { AuthUser } from '../auth/auth.types';
 import { UserRole } from '../auth/roles.enum';
 import { GeoPricingService } from './geo-pricing.service';
+import type { GeoPricingResult } from './geo-pricing.service';
+import { EmailService } from '../email/email.service';
+import type { EmailAttachment } from '../email/email.builder';
+import { AuthService } from '../auth/auth.service';
+import {
+  REGULAR_CLEANING_BASE_PRICES_V2,
+  REGULAR_CLEANING_PACKAGES_V2,
+  EXTRA_BEDROOM_PRICE_V2,
+  SPECIAL_SERVICES_V2,
+  OPTIONAL_EXTRAS_V2,
+  COMPATIBILITY_MATRIX_V2,
+  MUTUALLY_EXCLUSIVE_EXTRA_GROUPS_V2,
+  EXTRA_MAX_QUANTITY_V2,
+  BORDERLINE_FEE_AMOUNT_V2,
+  SERVICE_NOTES_FEE_V2,
+  type SpecialServiceIdV2,
+  type OptionalExtraIdV2,
+  type CompatibilityContextV2,
+  isExtraCompatibleV2,
+} from './catalogs/pricing-catalogs-v2';
 
 /**
  * @class BookingService
@@ -42,6 +68,8 @@ export class BookingService {
 
   /** Tarifa fija por recargo de distancia fuera de zona base */
   private readonly distanceSurchargeFee = 20;
+  private readonly geoUnavailablePreviewMessage =
+    'Address verification is temporarily unavailable. Estimate generated without coverage validation.';
 
   constructor(
     @InjectModel(Booking.name)
@@ -54,7 +82,88 @@ export class BookingService {
     private bookingStateService: BookingStateService,
     private employeesService: EmployeesService,
     private geoPricingService: GeoPricingService,
+    private readonly emailService: EmailService,
+    private readonly authService: AuthService,
   ) {}
+
+  private async resolveGeoForPricePreview(data: CreateBookingDto): Promise<{
+    geo: GeoPricingResult | null;
+    coverageResolved: boolean;
+    coverageMessage: string | null;
+  }> {
+    const address = typeof data.address === 'string' ? data.address.trim() : '';
+    const geo = await this.geoPricingService.computeFromInput({
+      address,
+      lat: data.lat,
+      lng: data.lng,
+    });
+    return {
+      geo,
+      coverageResolved: true,
+      coverageMessage: null,
+    };
+  }
+
+  private async resolveGeoForPricePreviewSafely(
+    data: CreateBookingDto,
+  ): Promise<{
+    geo: GeoPricingResult | null;
+    coverageResolved: boolean;
+    coverageMessage: string | null;
+  }> {
+    try {
+      return await this.resolveGeoForPricePreview(data);
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) {
+        this.logger.warn(
+          JSON.stringify({
+            event: 'pricing.preview.geo_fallback',
+            message: this.geoUnavailablePreviewMessage,
+          }),
+        );
+        return {
+          geo: null,
+          coverageResolved: false,
+          coverageMessage: this.geoUnavailablePreviewMessage,
+        };
+      }
+      throw error;
+    }
+  }
+
+  private async resolveGeoForQuoteRequest(data: CreateBookingDto): Promise<{
+    geo: GeoPricingResult | null;
+    coverageResolved: boolean;
+    coverageMessage: string | null;
+  }> {
+    try {
+      const geo = await this.geoPricingService.computeFromInput({
+        address: typeof data.address === 'string' ? data.address.trim() : '',
+        lat: data.lat,
+        lng: data.lng,
+      });
+      return {
+        geo,
+        coverageResolved: true,
+        coverageMessage: null,
+      };
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) {
+        this.logger.warn(
+          JSON.stringify({
+            event: 'quote_request.geo_fallback',
+            message: this.geoUnavailablePreviewMessage,
+          }),
+        );
+        return {
+          geo: null,
+          coverageResolved: false,
+          coverageMessage: this.geoUnavailablePreviewMessage,
+        };
+      }
+      throw error;
+    }
+  }
 
   /**
    * Genera una previsualización detallada del precio basada en la entrada del usuario.
@@ -63,48 +172,54 @@ export class BookingService {
    * @returns Desglose de precios, estado de cobertura y elegibilidad de descuento.
    */
   async previewPricing(data: CreateBookingDto) {
-    const wantsDiscountRequested = data.applyFirstDiscount === true;
-
+    const wantsDiscountRequested =
+      data.applyFirstDiscount === true || data.firstServiceDiscountRequested === true;
+    const discountRequested = wantsDiscountRequested;
     let discountEligible = false;
-    let discountApplied = false;
     if (wantsDiscountRequested) {
-      const address =
-        typeof data.address === 'string' ? data.address.trim() : '';
-      if (address) {
-        try {
-          const normalizedAddress = this.requireNormalizedAddress(address);
-          discountEligible =
-            !(await this.discountsService.hasUsedDiscountByNormalizedAddress(
-              normalizedAddress,
-            ));
-          discountApplied = discountEligible;
-        } catch {
-          discountEligible = false;
-          discountApplied = false;
-        }
+      const normalizedAddress = this.normalizeAddressIfPresent(data.address);
+      if (normalizedAddress) {
+        discountEligible =
+          !(await this.discountsService.hasUsedDiscountByNormalizedAddress(
+            normalizedAddress,
+          ));
       }
     }
+    const discountApplied = false;
 
     const address = typeof data.address === 'string' ? data.address.trim() : '';
     const hasCoords =
       typeof data.lat === 'number' && typeof data.lng === 'number';
     const shouldComputeGeo = !!address || hasCoords;
 
-    const geo = shouldComputeGeo
-      ? await this.geoPricingService.computeFromInput({
-          address,
-          lat: data.lat,
-          lng: data.lng,
-        })
-      : null;
+    const geoResolution = shouldComputeGeo
+      ? await this.resolveGeoForPricePreviewSafely(data)
+      : {
+          geo: null,
+          coverageResolved: false,
+          coverageMessage: null,
+        };
+    const geo = geoResolution.geo;
 
     const distanceSurcharge = geo?.distanceSurcharge === true;
     const distanceFee = distanceSurcharge ? this.distanceSurchargeFee : 0;
+
+    const version = this.readStringField(data, 'pricingModelVersion');
+    if (version === 'V2' && geo?.coverageClassification === 'OUTSIDE') {
+      throw new BadRequestException({
+        message:
+          'This address is outside our service area and beyond the borderline zone.',
+        coverageClassification: 'OUTSIDE',
+        closestZoneName: geo.closestZoneName ?? null,
+        closestZoneDistanceKm: geo.closestZoneDistanceKm ?? null,
+      });
+    }
 
     const pricing = this.calculatePricingBreakdown(
       data,
       discountApplied,
       distanceFee,
+      geo,
     );
     const estimatedBase = this.roundCurrency(pricing.baseServicePrice);
     const appliedDiscounts =
@@ -145,6 +260,47 @@ export class BookingService {
           ]
         : []),
     ];
+    const coverageClassification: string | null =
+      geo?.coverageClassification ?? null;
+    const borderlineFee =
+      typeof pricing.borderlineFee === 'number' ? pricing.borderlineFee : 0;
+
+    const itemsWithV2 = [
+      { label: 'Base service', amount: estimatedBase },
+      ...(pricing.additionalBedroomsFee > 0
+        ? [
+            {
+              label: 'Additional bedrooms',
+              amount: pricing.additionalBedroomsFee,
+            },
+          ]
+        : []),
+      ...(typeof pricing.specialServiceFee === 'number' &&
+      pricing.specialServiceFee > 0
+        ? [{ label: 'Special service', amount: pricing.specialServiceFee }]
+        : []),
+      ...(pricing.extrasTotal > 0
+        ? [{ label: 'Selected extras', amount: pricing.extrasTotal }]
+        : []),
+      ...(pricing.petsFee > 0
+        ? [{ label: 'Pets', amount: pricing.petsFee }]
+        : []),
+      ...(borderlineFee > 0
+        ? [{ label: 'Borderline fee', amount: borderlineFee }]
+        : []),
+      ...(pricing.distanceFee > 0 && borderlineFee === 0
+        ? [{ label: 'Distance surcharge', amount: pricing.distanceFee }]
+        : []),
+      ...(discountApplied && pricing.discountAmount > 0
+        ? [
+            {
+              label: `Discount (${pricing.discountPercent}%)`,
+              amount: -pricing.discountAmount,
+            },
+          ]
+        : []),
+    ];
+
     return {
       estimatedPrice: pricing.estimatedPrice,
       finalPricePreview: pricing.finalPrice,
@@ -158,9 +314,21 @@ export class BookingService {
       petsFee: pricing.petsFee,
       distanceFee: pricing.distanceFee,
       distanceSurcharge,
+      specialServiceFee: pricing.specialServiceFee ?? 0,
+      borderlineFee,
+      pricingModel: pricing.pricingModel ?? 'V1',
+      coverageClassification,
+      closestZoneName: geo?.closestZoneName ?? null,
+      closestZoneDistanceKm: geo?.closestZoneDistanceKm ?? null,
+      v2BorderlineFeeApplicable: geo?.v2BorderlineFeeApplicable === true,
       fees: {
+        baseServicePrice: pricing.baseServicePrice,
+        additionalBedroomsFee: pricing.additionalBedroomsFee,
+        extrasTotal: pricing.extrasTotal,
         petsFee: pricing.petsFee,
         distanceFee: pricing.distanceFee,
+        specialServiceFee: pricing.specialServiceFee ?? 0,
+        borderlineFee,
       },
       appliedDiscounts,
       breakdown: {
@@ -171,15 +339,19 @@ export class BookingService {
         extrasTotal: pricing.extrasTotal,
         petsFee: pricing.petsFee,
         distanceFee: pricing.distanceFee,
+        specialServiceFee: pricing.specialServiceFee ?? 0,
+        borderlineFee,
         discountPercent: pricing.discountPercent,
         discountAmount: pricing.discountAmount,
         finalPrice: pricing.finalPrice,
-        items,
+        items: itemsWithV2,
       },
       isBorderline: geo?.isBorderline === true,
       assignedZone: geo?.assignedZone ?? null,
       coverageStatus: geo?.status ?? 'outside',
       assignedDistanceKm: geo?.distanceKm ?? null,
+      coverageResolved: geoResolution.coverageResolved,
+      coverageMessage: geoResolution.coverageMessage,
       discountRequested: wantsDiscountRequested,
       discountEligible,
       discountApplied,
@@ -223,52 +395,41 @@ export class BookingService {
         );
       }
 
-      const wantsDiscountRequested = data.applyFirstDiscount === true;
-      let normalizedAddress: string | null = null;
-      if (wantsDiscountRequested) {
-        normalizedAddress = this.requireNormalizedAddress(data.address);
-      }
-
-      let discountEligible = false;
-      if (wantsDiscountRequested) {
-        const normalizedAddressForDiscount = normalizedAddress;
-        if (!normalizedAddressForDiscount) {
-          throw new BadRequestException('Address is required');
-        }
-        discountEligible =
-          !(await this.discountsService.hasUsedDiscountByNormalizedAddress(
-            normalizedAddressForDiscount,
-          ));
-      }
-
-      if (wantsDiscountRequested && !normalizedAddress) {
-        throw new BadRequestException('Address is required');
-      }
-      if (wantsDiscountRequested && normalizedAddress && !discountEligible) {
-        throw new ConflictException('Discount already used for this address');
-      }
-
-      const discountApplied =
-        wantsDiscountRequested &&
-        discountEligible &&
-        normalizedAddress !== null;
+      const wantsDiscountRequested = false;
+      const discountApplied = false;
+      const normalizedAddress: string | null = null;
       const geo = await this.geoPricingService.computeFromInput({
         address: typeof data.address === 'string' ? data.address.trim() : '',
         lat: data.lat,
         lng: data.lng,
       });
+      const version = this.readStringField(data, 'pricingModelVersion');
+      if (version === 'V2' && geo.coverageClassification === 'OUTSIDE') {
+        throw new BadRequestException({
+          message:
+            'This address is outside our service area and beyond the borderline zone.',
+          coverageClassification: 'OUTSIDE',
+          closestZoneName: geo.closestZoneName ?? null,
+          closestZoneDistanceKm: geo.closestZoneDistanceKm ?? null,
+        });
+      }
       const distanceFee = geo.distanceSurcharge ? this.distanceSurchargeFee : 0;
       const pricing = this.calculatePricingBreakdown(
         data,
         discountApplied,
         distanceFee,
+        geo,
       );
+
+      const borderlineFeeV2 =
+        typeof pricing.borderlineFee === 'number' ? pricing.borderlineFee : 0;
+      const coverageClassificationV2 = geo.coverageClassification;
 
       this.logger.debug(
         JSON.stringify({
           event: 'discount.evaluated',
           requested: wantsDiscountRequested,
-          eligible: discountEligible,
+          eligible: false,
           applied: discountApplied,
         }),
       );
@@ -323,6 +484,14 @@ export class BookingService {
         assignedZone: geo.assignedZone ?? undefined,
         isBorderline: geo.isBorderline,
         distanceKm: geo.distanceKm ?? undefined,
+        coverageClassification: coverageClassificationV2,
+        borderlineFee: borderlineFeeV2,
+        pricingModelVersion:
+          this.readStringField(data, 'pricingModelVersion') || undefined,
+        specialServiceId:
+          this.readStringField(data, 'specialServiceId') || undefined,
+        regularCleaningPackageId:
+          this.readStringField(data, 'regularCleaningPackageId') || undefined,
       };
 
       const bookingDataWithGeo = {
@@ -387,6 +556,174 @@ export class BookingService {
     }
   }
 
+  /**
+   * Crea una nueva solicitud de cotizacion reutilizando las validaciones actuales
+   * del flujo legacy de booking, pero sin habilitar cobro inmediato.
+   *
+   * DIFERENCIAS CLAVE VS createBooking():
+   * - Persiste `commercialStatus = quote_requested`.
+   * - Mantiene `status = pending` para compatibilidad operativa.
+   * - Inicializa `paymentLifecycleStatus = not_ready`.
+   * - NO genera `paymentUrl`.
+   * - NO invoca Stripe.
+   * - NO emite eventos legacy como `booking.created`, para evitar side effects
+   *   semanticos o emails del flujo antiguo.
+   *
+   * NOTA:
+   * - Seguimos calculando pricing server-side para conservar consistencia interna
+   *   y reutilizar el motor actual.
+   * - Ese pricing queda solo como snapshot tecnico interno; el endpoint nuevo
+   *   no lo expone en la respuesta.
+   */
+  async createQuoteRequest(data: CreateBookingDto) {
+    try {
+      data.email = this.normalizeEmail(data.email);
+
+      if (!data.email) {
+        throw new BadRequestException('Email is required');
+      }
+
+      if (
+        data.estimatedPrice !== undefined ||
+        data.finalPricePreview !== undefined
+      ) {
+        this.logger.debug(
+          JSON.stringify({ event: 'pricing.client_snapshot_ignored' }),
+        );
+      }
+
+      const desiredAt = this.parseDesiredDateTime(
+        data.desiredDate,
+        data.desiredTime,
+      );
+      this.enforceBookingScheduleRules(desiredAt);
+      if (desiredAt.getTime() <= Date.now()) {
+        throw new BadRequestException(
+          'Desired date/time must be in the future',
+        );
+      }
+
+      const wantsDiscountRequested =
+      data.applyFirstDiscount === true || data.firstServiceDiscountRequested === true;
+      let normalizedAddress: string | null = null;
+      if (wantsDiscountRequested) {
+        normalizedAddress = this.requireNormalizedAddress(data.address);
+      }
+
+      const discountApplied = false;
+      const discountEligible = false;
+      const geoResolution = await this.resolveGeoForQuoteRequest(data);
+      const geo = geoResolution.geo;
+      const version = this.readStringField(data, 'pricingModelVersion');
+      if (version === 'V2' && geo?.coverageClassification === 'OUTSIDE') {
+        throw new BadRequestException({
+          message:
+            'This address is outside our service area and beyond the borderline zone.',
+          coverageClassification: 'OUTSIDE',
+          closestZoneName: geo.closestZoneName ?? null,
+          closestZoneDistanceKm: geo.closestZoneDistanceKm ?? null,
+        });
+      }
+      const distanceFee =
+        geo?.distanceSurcharge === true ? this.distanceSurchargeFee : 0;
+      const pricing = this.calculatePricingBreakdown(
+        data,
+        discountApplied,
+        distanceFee,
+        geo,
+      );
+      const borderlineFeeV2 =
+        typeof pricing.borderlineFee === 'number' ? pricing.borderlineFee : 0;
+      const coverageClassificationV2 = geo?.coverageClassification ?? null;
+
+      this.logger.debug(
+        JSON.stringify({
+          event: 'quote_request.discount_evaluated',
+          requested: wantsDiscountRequested,
+          eligible: discountEligible,
+          applied: discountApplied,
+        }),
+      );
+      this.logger.debug(
+        JSON.stringify({
+          event: 'quote_request.pricing_computed',
+          estimatedPrice: pricing.estimatedPrice,
+          finalPrice: pricing.finalPrice,
+          distanceFee,
+          distanceSurcharge: geo?.distanceSurcharge === true,
+          assignedZone: geo?.assignedZone ?? null,
+          isBorderline: geo?.isBorderline === true,
+          coverageResolved: geoResolution.coverageResolved,
+        }),
+      );
+
+      const existing = await this.findRecentDuplicateBooking(data);
+      if (existing) {
+        return {
+          success: true,
+          message: 'Quote request saved successfully',
+          data: this.toQuoteRequestBooking(existing),
+        };
+      }
+
+      const bookingData = this.stripClientControlledFields(data);
+      const geoPayload: Partial<CreateBookingDto> = {
+        lat: geo?.lat ?? undefined,
+        lng: geo?.lng ?? undefined,
+        distanceSurcharge: geo?.distanceSurcharge === true,
+        assignedZone: geo?.assignedZone ?? undefined,
+        isBorderline: geo?.isBorderline === true,
+        distanceKm: geo?.distanceKm ?? undefined,
+        coverageClassification: coverageClassificationV2 ?? undefined,
+        borderlineFee: borderlineFeeV2,
+        pricingModelVersion:
+          this.readStringField(data, 'pricingModelVersion') || undefined,
+        specialServiceId:
+          this.readStringField(data, 'specialServiceId') || undefined,
+        regularCleaningPackageId:
+          this.readStringField(data, 'regularCleaningPackageId') || undefined,
+      };
+
+      const bookingDataWithGeo = {
+        ...bookingData,
+        ...geoPayload,
+      } as Omit<
+        CreateBookingDto,
+        'estimatedPrice' | 'finalPricePreview' | 'applyFirstDiscount'
+      >;
+
+      const quoteFlowPayload = {
+        status: 'pending' as const,
+        commercialStatus: 'quote_requested' as const,
+        paymentLifecycleStatus: 'not_ready' as const,
+      };
+
+      const payload = {
+        ...bookingData,
+        ...geoPayload,
+        ...quoteFlowPayload,
+        firstServiceDiscountRequested: wantsDiscountRequested,
+        applyFirstDiscount: wantsDiscountRequested,
+        estimatedPrice: pricing.estimatedPrice,
+        finalPricePreview: pricing.finalPrice,
+      };
+
+      const createdBooking = await this.bookingModel.create(payload);
+      this.emitBookingQuoteRequestedEvent(createdBooking);
+
+      return {
+        success: true,
+        message: 'Quote request saved successfully',
+        data: this.toQuoteRequestBooking(createdBooking),
+      };
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      if (error instanceof ConflictException) throw error;
+
+      throw new InternalServerErrorException('Failed to save quote request');
+    }
+  }
+
   async updateStatus(id: string, status: BookingStatus) {
     if (!isValidObjectId(id)) {
       throw new BadRequestException('Invalid booking id');
@@ -402,7 +739,12 @@ export class BookingService {
       source: 'admin',
     });
 
-    if (previous !== next && next === 'confirmed') {
+    const shouldAutoCreateStripeOnConfirm =
+      previous !== next &&
+      next === 'confirmed' &&
+      this.shouldAutoCreateStripeOnConfirm(booking);
+
+    if (shouldAutoCreateStripeOnConfirm) {
       const expectedAmount = booking.finalPricePreview;
       const isValidPrice =
         typeof expectedAmount === 'number' &&
@@ -505,6 +847,1030 @@ export class BookingService {
     return updated;
   }
 
+  /**
+   * Inicia la revision administrativa de una quote request.
+   *
+   * REGLA:
+   * - Solo transiciona el estado comercial.
+   * - No toca `status`, `paymentStatus` ni Stripe.
+   */
+  async startQuoteReview(
+    id: string,
+    actor?: AuthUser,
+  ): Promise<BookingDocument> {
+    const booking = await this.requireBookingById(id);
+    const current = this.getCommercialStatus(booking);
+
+    this.assertCommercialTransition(current, 'under_review', [
+      'quote_requested',
+    ]);
+
+    const now = new Date();
+    booking.commercialStatus = 'under_review';
+    booking.paymentLifecycleStatus =
+      booking.paymentLifecycleStatus ?? 'not_ready';
+    booking.quote = {
+      ...(this.getQuoteRecord(booking) ?? {}),
+      reviewedBy: this.resolveActorIdentifier(actor),
+      reviewedAt: now,
+    } as typeof booking.quote;
+
+    return booking.save();
+  }
+
+  /**
+   * § SURGICAL FIX (Admin Fixed-Discount workflow):
+   * Save a quote draft. The ONLY price-affecting input the backend honors
+   * is `discountType` (defaults to 'none' if not provided for anti-tamper).
+   *
+   * SINGLE SOURCE OF TRUTH:
+   *   - originalCalculatedPrice ← authoritative V2 pricing engine
+   *     (recomputed from the booking record, NEVER from frontend
+   *     baseCalculatedPrice or legacy quote.finalQuotedPrice)
+   *   - discountPercent ← resolveAdminQuoteDiscountPercent(discountType)
+   *     (hard-fixed 4-tier map, NEVER from frontend)
+   *   - discountAmount / finalQuotedPrice ← server-side math
+   *
+   * FRONTEND PRICE INPUTS ARE ACTIVELY IGNORED (not only when
+   * discountType is present — ALWAYS):
+   *   input.finalQuotedPrice   → ignored / not used
+   *   input.baseCalculatedPrice → ignored / not used
+   *   input.manualAdjustments  → ignored / not used
+   *   input.discountPercent    → (not even accepted by DTO; rejected at HTTP boundary via @IsIn)
+   *
+   * Historical MongoDB documents that do NOT contain discountType
+   * fields remain READABLE (no schema migration or data deletion).
+   * The legacy arbitrary-price write path is CLOSED for active Admin
+   * editing — every draft is saved via the fixed-discount model.
+   *
+   * Non-price metadata that is still honored:
+   *   discountReason, expiresAt, customerMessage, internalNotes.
+   */
+  async saveQuoteDraft(
+    id: string,
+    input: {
+      baseCalculatedPrice?: number;
+      finalQuotedPrice?: number;
+      manualAdjustments?: Array<{
+        type: 'fixed' | 'percent';
+        label: string;
+        amount: number;
+        reason?: string;
+      }>;
+      discountType?: AdminQuoteDiscountType;
+      discountReason?: string;
+      expiresAt?: string;
+      customerMessage?: string;
+      internalNotes?: string;
+    },
+    actor?: AuthUser,
+  ): Promise<BookingDocument> {
+    const booking = await this.requireBookingById(id);
+    const current = this.getCommercialStatus(booking);
+
+    if (current === null || current === undefined) {
+      booking.commercialStatus = 'quote_requested';
+    } else {
+      this.assertCommercialTransition(current, 'quoted_draft', [
+        'quote_requested',
+        'under_review',
+        'quoted_draft',
+      ]);
+    }
+
+    if (!this.hasMeaningfulQuoteDraftInput(input)) {
+      throw new BadRequestException('At least one quote field is required');
+    }
+
+    const now = new Date();
+    const existingQuote = this.getQuoteRecord(booking) ?? {};
+
+    // ── § FIXED-DISCOUNT AUTHORITATIVE PATH (ALWAYS ACTIVE) ─────────
+    // Step 1: resolve discountType identifier. If attacker omits it to
+    // try legacy arbitrary-price route, default to 'none' so the SSoT
+    // path still runs and produces a legitimate server-calculated quote.
+    const suppliedDiscountTypeRaw: unknown =
+      typeof input.discountType === 'string' && input.discountType.trim()
+        ? input.discountType.trim()
+        : 'none';
+    const resolvedDiscountType: AdminQuoteDiscountType =
+      suppliedDiscountTypeRaw as AdminQuoteDiscountType;
+    const resolvedPercent: number =
+      this.resolveAdminQuoteDiscountPercent(resolvedDiscountType);
+    if (!Number.isFinite(resolvedPercent) || resolvedPercent < 0 || resolvedPercent > 100) {
+      throw new InternalServerErrorException(
+        `Discount resolution failed for ${String(resolvedDiscountType)}`,
+      );
+    }
+
+    // Step 2: authoritative UNDISCOUNTED base price from V2 engine.
+    // IGNORES frontend-supplied baseCalculatedPrice.
+    // IGNORES legacy booking.quote.baseCalculatedPrice (could be $20
+    // arbitrary value from previous free-form workflow).
+    // IGNORES legacy booking.quote.finalQuotedPrice (never used as base).
+    const undiscountedAuthoritative = this.recomputeUndiscountedAuthoritativeBase(booking);
+    const serverBase: number = this.roundCurrency(undiscountedAuthoritative);
+    if (!Number.isFinite(serverBase) || serverBase <= 0) {
+      throw new InternalServerErrorException(
+        'Could not compute an authoritative base price for this booking. Please check catalog data.',
+      );
+    }
+
+    // Step 3: server-side math.
+    const serverDiscountAmount: number = this.roundCurrency(
+      serverBase * (resolvedPercent / 100),
+    );
+    const serverFinalQuoted: number = this.roundCurrency(
+      Math.max(0, serverBase - serverDiscountAmount),
+    );
+
+    // Step 4: discount reason (non-price metadata). Preserve existing
+    // quote.discountReason if the current payload omits it.
+    const existingDiscountReason =
+      typeof (existingQuote as { discountReason?: unknown }).discountReason === 'string'
+        ? ((existingQuote as { discountReason: string }).discountReason as string)
+        : '';
+    const serverDiscountReason: string | undefined =
+      typeof input.discountReason === 'string' && input.discountReason.trim()
+        ? input.discountReason.trim()
+        : existingDiscountReason || undefined;
+
+    // Step 5: audit manualAdjustments entry (exactly 1 percent row if
+    // discount>0; otherwise empty array). REPLACES any legacy arbitrary
+    // rows from previous free-form workflow.
+    const discountLabel = this.getAdminQuoteDiscountLabel(resolvedDiscountType);
+    const serverManualAdjustments: Array<{
+      type: 'fixed' | 'percent';
+      label: string;
+      amount: number;
+      reason?: string;
+    }> =
+      serverDiscountAmount > 0
+        ? [
+            {
+              type: 'percent',
+              label: discountLabel,
+              amount: serverDiscountAmount,
+              ...(serverDiscountReason !== undefined && { reason: serverDiscountReason }),
+            },
+          ]
+        : [];
+
+    const nextVersion =
+      typeof existingQuote.version === 'number' && existingQuote.version > 0
+        ? existingQuote.version
+        : 1;
+
+    const nextExpiresAt =
+      typeof input.expiresAt === 'string' && input.expiresAt.trim()
+        ? this.parseQuoteDate(input.expiresAt, 'expiresAt')
+        : existingQuote.expiresAt;
+
+    booking.commercialStatus = 'quoted_draft';
+    booking.paymentLifecycleStatus =
+      booking.paymentLifecycleStatus ?? 'not_ready';
+    booking.quote = {
+      ...existingQuote,
+      version: nextVersion,
+      status: 'draft',
+      // § Server-authoritative ONLY (never use frontend-supplied or legacy arbitrary numbers):
+      baseCalculatedPrice: serverBase,
+      finalQuotedPrice: serverFinalQuoted,
+      discountType: resolvedDiscountType,
+      discountPercent: resolvedPercent,
+      discountAmount: serverDiscountAmount,
+      ...(serverDiscountReason !== undefined && { discountReason: serverDiscountReason }),
+      manualAdjustments: serverManualAdjustments,
+      reviewedBy:
+        this.resolveActorIdentifier(actor) || existingQuote.reviewedBy,
+      reviewedAt: existingQuote.reviewedAt ?? now,
+      expiresAt: nextExpiresAt,
+      customerMessage: input.customerMessage ?? existingQuote.customerMessage,
+      internalNotes: input.internalNotes ?? existingQuote.internalNotes,
+    } as typeof booking.quote;
+
+    if (resolvedDiscountType === 'first_time_customer') {
+      const alreadyApplied = booking.discountApplied === true;
+      booking.discountApplied = true;
+      booking.discountPercent = resolvedPercent;
+      booking.discountAmount = serverDiscountAmount;
+      const actorId =
+        this.resolveActorIdentifier(actor) ||
+        (typeof (existingQuote as { reviewedBy?: unknown }).reviewedBy === 'string'
+          ? ((existingQuote as { reviewedBy: string }).reviewedBy || '')
+          : '') ||
+        'admin';
+      booking.discountAppliedBy = actorId;
+      booking.discountAppliedAt = new Date();
+      booking.finalPricePreview = serverFinalQuoted;
+
+      if (!alreadyApplied) {
+        const rawAddress = typeof booking.address === 'string' ? booking.address.trim() : '';
+        if (rawAddress) {
+          const normalizedAddr = normalizeAddress(rawAddress);
+          if (normalizedAddr) {
+            try {
+              await this.discountsService.markAddressAsUsed({
+                normalizedAddress: normalizedAddr,
+                email: typeof booking.email === 'string' ? booking.email : undefined,
+                bookingId: String(booking._id),
+              });
+            } catch (discountErr) {
+              if (
+                !(
+                  discountErr instanceof Error &&
+                  this.isDuplicateKeyError(discountErr)
+                )
+              ) {
+                this.logger.warn(
+                  JSON.stringify({
+                    event: 'save_quote_draft.mark_address_used_failed',
+                    bookingId: String(booking._id),
+                    normalizedAddress: normalizedAddr,
+                    error:
+                      discountErr instanceof Error
+                        ? discountErr.message
+                        : String(discountErr),
+                  }),
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return booking.save();
+  }
+
+  /**
+   * Recompute the authoritative UNDISCOUNTED base calculated price
+   * from an existing booking using the V2 pricing engine.
+   *
+   * Used by saveQuoteDraft & applyAdminFirstServiceDiscount integration
+   * so both discount flows derive the base consistently from catalog
+   * data — no trust in frontend-supplied numbers.
+   */
+  private recomputeUndiscountedAuthoritativeBase(
+    booking: BookingDocument,
+  ): number {
+    try {
+      const dtoLike =
+        this.buildPricingDtoFromBookingRecord(booking);
+      const pricing = this.calculatePricingBreakdown(
+        dtoLike as unknown as CreateBookingDto,
+        true,
+        0, // geo/distance: re-query would be required but this matches how applyAdminFirstServiceDiscount does it.
+        null,
+      );
+      // § pricing.estimatedPrice = UNDISCOUNTED price BEFORE discount
+      // percent subtraction inside pricing engine (discount calculations
+      // inside calculatePricingBreakdown only fire for customer-requested
+      // discounts that are auto-applied by catalog rules — the Admin
+      // apply/quote discounts are layered AFTER on top of this base).
+      const estimated =
+        typeof pricing?.estimatedPrice === 'number' &&
+        Number.isFinite(pricing.estimatedPrice)
+          ? pricing.estimatedPrice
+          : NaN;
+
+      // Safety guard: if the booking record already has an authoritative
+      // snapshot (estimatedPrice) set at booking-creation time with
+      // complete user selections, AND the recomputed engine value is
+      // smaller (indicates some persisted V2 fields like extras/special
+      // ServiceId/additionalBedrooms were not reloaded), prefer the
+      // stored snapshot.  This cannot be used for discount injection
+      // because discounts are layered AFTER this base; and it ONLY
+      // prefers the stored snapshot if it is >= recomputed (so we
+      // never accidentally trust a stale lower stored snapshot if
+      // engine returns correct higher base).
+      const estRaw =
+        typeof booking.estimatedPrice === 'number' &&
+        Number.isFinite(booking.estimatedPrice)
+          ? booking.estimatedPrice
+          : 0;
+      const legacyDiscount =
+        booking.discountApplied === true &&
+        typeof booking.discountAmount === 'number' &&
+        Number.isFinite(booking.discountAmount)
+          ? booking.discountAmount
+          : 0;
+      const storedBaseline = this.roundCurrency(estRaw + legacyDiscount);
+
+      if (Number.isFinite(estimated) && estimated > 0) {
+        if (storedBaseline > estimated) return storedBaseline;
+        return estimated;
+      }
+    } catch {
+      /* swallow – fall through to backup derivation below */
+    }
+
+    // Backup derivation: if pricing engine unavailable for edge-case
+    // legacy booking shape, derive from booking.estimatedPrice minus
+    // any already-applied legacy booking.discountAmount so we return
+    // the UNDISCOUNTED baseline. (Never let an already-applied legacy
+    // discount sneak into the new discount quote base — prevents
+    // double-discount.)
+    const estRaw =
+      typeof booking.estimatedPrice === 'number' &&
+      Number.isFinite(booking.estimatedPrice)
+        ? booking.estimatedPrice
+        : 0;
+    const legacyDiscount =
+      booking.discountApplied === true &&
+      typeof booking.discountAmount === 'number' &&
+      Number.isFinite(booking.discountAmount)
+        ? booking.discountAmount
+        : 0;
+    const fallback = this.roundCurrency(estRaw + legacyDiscount);
+    return fallback > 0 ? fallback : estRaw;
+  }
+
+  /**
+   * Build a CreateBookingDto-shaped plain object from an existing booking
+   * document, suitable for re-feeding into the V2 pricing engine so the
+   * authoritative undiscounted baseline can be recomputed server-side
+   * (never trusting frontend-supplied baseCalculatedPrice).
+   *
+   * Used by:
+   *   - recomputeUndiscountedAuthoritativeBase()   (saveQuoteDraft path)
+   *   - applyAdminFirstServiceDiscount()           (legacy 15% endpoint sync)
+   *
+   * Returns a dto-like object with all primitives coerced from mixed
+   * booking-document / legacy types so pricing catalog lookups succeed.
+   */
+  private buildPricingDtoFromBookingRecord(
+    booking: BookingDocument,
+  ): Partial<CreateBookingDto> & Record<string, unknown> {
+    const bookingObj =
+      typeof (booking as unknown as { toObject?: () => unknown }).toObject ===
+      'function'
+        ? ((booking as unknown as { toObject(): Record<string, unknown> }).toObject() as Record<string, unknown>)
+        : (booking as unknown as Record<string, unknown>);
+
+    return {
+      ...bookingObj,
+      address: typeof bookingObj.address === 'string' ? bookingObj.address : '',
+      cleaningType: typeof bookingObj.cleaningType === 'string' ? bookingObj.cleaningType : '',
+      serviceType: typeof bookingObj.serviceType === 'string' ? (bookingObj.serviceType as CreateBookingDto['serviceType']) : undefined,
+      bedrooms:
+        typeof bookingObj.bedrooms === 'number' ? bookingObj.bedrooms :
+        typeof bookingObj.bedrooms === 'string' ? Number(bookingObj.bedrooms) : 1,
+      bathrooms:
+        typeof bookingObj.bathrooms === 'number' ? bookingObj.bathrooms :
+        typeof bookingObj.bathrooms === 'string' ? Number(bookingObj.bathrooms) : 1,
+      additionalBedrooms:
+        typeof bookingObj.additionalBedrooms === 'number' ? bookingObj.additionalBedrooms :
+        typeof bookingObj.additionalBedrooms === 'string' ? Number(bookingObj.additionalBedrooms) : 0,
+      extras: Array.isArray(bookingObj.extras) ? (bookingObj.extras as CreateBookingDto['extras']) : [],
+      petsAtHome: bookingObj.petsAtHome === true,
+      useOwnProducts: bookingObj.useOwnProducts === true || (bookingObj as { usesOwnCleaningProducts?: boolean }).usesOwnCleaningProducts === true,
+      specialServiceId:
+        typeof bookingObj.specialServiceId === 'string' ? bookingObj.specialServiceId : undefined,
+      regularCleaningPackageId:
+        typeof bookingObj.regularCleaningPackageId === 'string' ? bookingObj.regularCleaningPackageId : undefined,
+      frequency:
+        typeof bookingObj.frequency === 'string' ? (bookingObj.frequency as CreateBookingDto['frequency']) : undefined,
+      pricingModelVersion:
+        typeof bookingObj.pricingModelVersion === 'string' ? bookingObj.pricingModelVersion : undefined,
+      borderlineFee:
+        typeof bookingObj.borderlineFee === 'number' ? bookingObj.borderlineFee : undefined,
+      lat: typeof bookingObj.lat === 'number' ? bookingObj.lat : undefined,
+      lng: typeof bookingObj.lng === 'number' ? bookingObj.lng : undefined,
+    } as Partial<CreateBookingDto> & Record<string, unknown>;
+  }
+
+  /**
+   * Marca una cotizacion como enviada.
+   *
+   * VALIDACIONES:
+   * - Debe existir un draft previo.
+   * - Debe existir `finalQuotedPrice` valido.
+   */
+  async sendQuote(id: string, actor?: AuthUser): Promise<BookingDocument> {
+    const booking = await this.requireBookingById(id);
+    const current = this.getCommercialStatus(booking);
+
+    this.assertCommercialTransition(current, 'quote_sent', [
+      'under_review',
+      'quoted_draft',
+    ]);
+
+    const quote = this.getQuoteRecord(booking);
+    const finalQuotedPrice = quote?.finalQuotedPrice;
+    if (
+      typeof finalQuotedPrice !== 'number' ||
+      !Number.isFinite(finalQuotedPrice) ||
+      finalQuotedPrice <= 0
+    ) {
+      throw new BadRequestException(
+        'A valid finalQuotedPrice is required before sending the quote',
+      );
+    }
+
+    const now = new Date();
+    booking.commercialStatus = 'quote_sent';
+    booking.paymentLifecycleStatus =
+      booking.paymentLifecycleStatus ?? 'not_ready';
+    booking.quote = {
+      ...quote,
+      version:
+        typeof quote?.version === 'number' && quote.version > 0
+          ? quote.version
+          : 1,
+      status: 'sent',
+      reviewedBy: this.resolveActorIdentifier(actor) || quote?.reviewedBy,
+      reviewedAt: quote?.reviewedAt ?? now,
+      sentAt: now,
+    } as typeof booking.quote;
+
+    const updated = await booking.save();
+    this.emitBookingQuoteSentEvent(updated);
+    return updated;
+  }
+
+  /**
+   * Rechaza administrativamente una cotizacion.
+   */
+  async rejectQuote(
+    id: string,
+    input?: { internalNotes?: string; rejectionReason?: string },
+    actor?: AuthUser,
+  ): Promise<BookingDocument> {
+    const booking = await this.requireBookingById(id);
+    const current = this.getCommercialStatus(booking);
+
+    this.assertCommercialTransition(current, 'quote_rejected', [
+      'quote_requested',
+      'under_review',
+      'quoted_draft',
+      'quote_sent',
+    ]);
+
+    const now = new Date();
+    const quote = this.getQuoteRecord(booking) ?? {};
+
+    booking.commercialStatus = 'quote_rejected';
+    booking.paymentLifecycleStatus =
+      booking.paymentLifecycleStatus ?? 'not_ready';
+    booking.quote = {
+      ...quote,
+      version:
+        typeof quote.version === 'number' && quote.version > 0
+          ? quote.version
+          : 1,
+      status: 'rejected',
+      reviewedBy: this.resolveActorIdentifier(actor) || quote.reviewedBy,
+      reviewedAt: quote.reviewedAt ?? now,
+      rejectedAt: now,
+      internalNotes: input?.internalNotes ?? quote.internalNotes,
+      customerMessage: input?.rejectionReason ?? quote.customerMessage,
+    } as typeof booking.quote;
+
+    const updated = await booking.save();
+    this.emitBookingQuoteRejectedEvent(updated);
+    return updated;
+  }
+
+  /**
+   * Reabre una cotizacion previamente rechazada, devolviendola a un estado
+   * editable para el Administrador.
+   *
+   * Restricciones:
+   * - Solo es valido si commercialStatus === 'quote_rejected'.
+   * - No se permite si el estado operativo legacy es 'paid', 'completed' o
+   *   'cancelled', ni si paymentStatus === 'paid' ni si ya existe una sesion
+   *   de Stripe (checkout_created).
+   * - No re-envia correos al cliente ni genera sesiones de Stripe.
+   * - No crea un nuevo booking ni elimina informacion historica de rechazo
+   *   (rejectedAt se conserva en el registro quote existente si la plataforma
+   *   lo persiste; los campos nuevos se escriben sin sobreescribirlo
+   *   innecesariamente).
+   */
+  async reopenQuote(
+    id: string,
+    actor?: AuthUser,
+  ): Promise<BookingDocument> {
+    // (role check: Controller enforces via RolesGuard; defensive duplicate here.)
+    if (actor && typeof (actor as any).role === 'string' && (actor as any).role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Only administrators can reopen a rejected quote');
+    }
+    const booking = await this.requireBookingById(id);
+    const current = this.getCommercialStatus(booking);
+
+    // 1. Solo se permite desde quote_rejected.
+    this.assertCommercialTransition(current, 'under_review', [
+      'quote_rejected',
+    ]);
+    // 2. Cierre comercial definitivo: no permitir si ya esta finalizado de
+    // otra manera (legacy status / pagado / Stripe creado).
+    const legacyStatus = booking.status;
+    const paymentStatus = booking.paymentStatus;
+    const lifecycle = booking.paymentLifecycleStatus;
+    const blockedLegacy: BookingStatus[] = ['paid', 'completed', 'cancelled'];
+    if (typeof legacyStatus === 'string' && blockedLegacy.includes(legacyStatus)) {
+      throw new ConflictException(
+        `Cannot reopen a booking with legacy status '${legacyStatus}'`,
+      );
+    }
+    if (paymentStatus === 'paid') {
+      throw new ConflictException('Cannot reopen a paid booking');
+    }
+    if (lifecycle === 'checkout_created' || lifecycle === 'payment_pending' || lifecycle === 'paid' || lifecycle === 'refunded') {
+      throw new ConflictException(
+        'Cannot reopen a booking with an active Stripe checkout session',
+      );
+    }
+    const quote = this.getQuoteRecord(booking) ?? {};
+
+    // 3. Preservar informacion historica del rechazo si existe.
+    const historicalRejectedAt =
+      (quote as { rejectedAt?: unknown }).rejectedAt instanceof Date
+        ? (quote as { rejectedAt: Date }).rejectedAt
+        : typeof (quote as { rejectedAt?: unknown }).rejectedAt === 'string'
+          ? new Date((quote as { rejectedAt: string }).rejectedAt)
+          : undefined;
+    const historicalRejectionReason =
+      typeof (quote as { rejectionReason?: unknown }).rejectionReason === 'string'
+        ? (quote as { rejectionReason: string }).rejectionReason
+        : undefined;
+
+    const now = new Date();
+    booking.commercialStatus = 'under_review';
+    booking.paymentLifecycleStatus =
+      booking.paymentLifecycleStatus ?? 'not_ready';
+    booking.quote = {
+      ...quote,
+      status: 'draft',
+      version:
+        typeof quote.version === 'number' && quote.version > 0
+          ? quote.version + 1
+          : 1,
+      reviewedBy: this.resolveActorIdentifier(actor) || quote.reviewedBy,
+      reviewedAt: now,
+      reopenedAt: now,
+      reopenedBy: this.resolveActorIdentifier(actor) || undefined,
+      // Conservar historico si la plataforma lo tenia (auditoria).
+      ...(historicalRejectedAt && { rejectedAt: historicalRejectedAt }),
+      ...(historicalRejectionReason && {
+        rejectionReason: historicalRejectionReason,
+      }),
+    } as typeof booking.quote;
+
+    return booking.save();
+  }
+
+  /**
+   * Revisar / corregir cotizacion ya enviada (quote_sent → under_review).
+   *
+   * Alcance:
+   * - Solo cuando commercialStatus = quote_sent.
+   * - Bloquea si ya esta pagado / completado / cancelado / refundido o
+   *   hay una sesion Stripe de checkout activa.
+   * - No crea nuevo booking, no crea Stripe, no envia email solo por revisar.
+   * - Incrementa quote.version y registra revisedAt / revisedBy.
+   * - Preserva informacion historica (sentAt, rejectedAt, etc.) si ya existe.
+   */
+  async reviseQuote(
+    id: string,
+    actor?: AuthUser,
+  ): Promise<BookingDocument> {
+    // Defensive role guard (defense in depth; controller enforces RolesGuard too).
+    if (actor && typeof (actor as any).role === 'string' && (actor as any).role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Only administrators can revise a sent quote');
+    }
+    const booking = await this.requireBookingById(id);
+    const current = this.getCommercialStatus(booking);
+
+    // 1. Solo se permite desde quote_sent.
+    this.assertCommercialTransition(current, 'under_review', [
+      'quote_sent',
+    ]);
+
+    // 2. Bloquear cierres definitivos.
+    const legacyStatus = booking.status;
+    const paymentStatus = booking.paymentStatus;
+    const lifecycle = booking.paymentLifecycleStatus;
+    const blockedLegacy: BookingStatus[] = ['paid', 'completed', 'cancelled'];
+    if (typeof legacyStatus === 'string' && blockedLegacy.includes(legacyStatus)) {
+      throw new ConflictException(
+        `Cannot revise a booking with legacy status '${legacyStatus}'`,
+      );
+    }
+    if (paymentStatus === 'paid') {
+      throw new ConflictException('Cannot revise a paid booking');
+    }
+    if (lifecycle === 'checkout_created' || lifecycle === 'payment_pending' || lifecycle === 'paid' || lifecycle === 'refunded') {
+      throw new ConflictException(
+        'Cannot revise a booking with an active Stripe checkout session',
+      );
+    }
+    const quote = this.getQuoteRecord(booking) ?? {};
+
+    // 3. Preservar informacion historica existente (sentAt / rejectedAt / etc.)
+    const historicalSentAt =
+      (quote as { sentAt?: unknown }).sentAt instanceof Date
+        ? (quote as { sentAt: Date }).sentAt
+        : typeof (quote as { sentAt?: unknown }).sentAt === 'string'
+          ? new Date((quote as { sentAt: string }).sentAt)
+          : undefined;
+    const historicalRejectedAt =
+      (quote as { rejectedAt?: unknown }).rejectedAt instanceof Date
+        ? (quote as { rejectedAt: Date }).rejectedAt
+        : typeof (quote as { rejectedAt?: unknown }).rejectedAt === 'string'
+          ? new Date((quote as { rejectedAt: string }).rejectedAt)
+          : undefined;
+    const historicalRejectionReason =
+      typeof (quote as { rejectionReason?: unknown }).rejectionReason === 'string'
+        ? (quote as { rejectionReason: string }).rejectionReason
+        : undefined;
+
+    const now = new Date();
+    booking.commercialStatus = 'under_review';
+    booking.paymentLifecycleStatus =
+      booking.paymentLifecycleStatus ?? 'not_ready';
+    booking.quote = {
+      ...quote,
+      status: 'draft',
+      version:
+        typeof quote.version === 'number' && quote.version > 0
+          ? quote.version + 1
+          : 1,
+      reviewedBy: this.resolveActorIdentifier(actor) || quote.reviewedBy,
+      reviewedAt: now,
+      revisedAt: now,
+      revisedBy: this.resolveActorIdentifier(actor) || undefined,
+      // Conservar historico (auditoria).
+      ...(historicalSentAt && { sentAt: historicalSentAt }),
+      ...(historicalRejectedAt && { rejectedAt: historicalRejectedAt }),
+      ...(historicalRejectionReason && {
+        rejectionReason: historicalRejectionReason,
+      }),
+    } as typeof booking.quote;
+
+    return booking.save();
+  }
+
+  /**
+   * Expira una cotizacion previamente enviada.
+   */
+  async expireQuote(id: string, actor?: AuthUser): Promise<BookingDocument> {
+    const booking = await this.requireBookingById(id);
+    const current = this.getCommercialStatus(booking);
+
+    this.assertCommercialTransition(current, 'quote_expired', ['quote_sent']);
+
+    const now = new Date();
+    const quote = this.getQuoteRecord(booking) ?? {};
+
+    booking.commercialStatus = 'quote_expired';
+    booking.paymentLifecycleStatus =
+      booking.paymentLifecycleStatus ?? 'not_ready';
+    booking.quote = {
+      ...quote,
+      version:
+        typeof quote.version === 'number' && quote.version > 0
+          ? quote.version
+          : 1,
+      status: 'expired',
+      reviewedBy: this.resolveActorIdentifier(actor) || quote.reviewedBy,
+      reviewedAt: quote.reviewedAt ?? now,
+      expiresAt: quote.expiresAt ?? now,
+    } as typeof booking.quote;
+
+    return booking.save();
+  }
+
+  /**
+   * Authoritative Admin action: confirms the quote/booking, creates the Stripe
+   * checkout link at the FINAL ADMIN-APPROVED price (NOT a frontend-supplied value),
+   * marks lifecycle/payment statuses, sends the customer payment email.
+   *
+   * Idempotent: if a paymentUrl already exists and is valid, returns the existing
+   * booking WITHOUT creating a second Stripe session and WITHOUT sending a duplicate
+   * customer payment email.
+   */
+  async confirmAndSendPayment(
+    id: string,
+    actor?: AuthUser,
+  ): Promise<{
+    booking: Record<string, unknown>;
+    wasAlreadyIssued: boolean;
+    stripeSessionId?: string | null;
+    customerEmailSent: boolean;
+  }> {
+    const booking = await this.requireBookingById(id);
+
+    const legacyStatus = booking.status;
+    if (legacyStatus === 'cancelled') {
+      throw new BadRequestException('Cannot confirm a cancelled booking');
+    }
+    if (legacyStatus === 'paid' || booking.paymentStatus === 'paid') {
+      throw new BadRequestException('Cannot confirm an already paid booking');
+    }
+
+    const originalEstimated =
+      typeof booking.estimatedPrice === 'number' && Number.isFinite(booking.estimatedPrice)
+        ? booking.estimatedPrice
+        : typeof booking.finalPricePreview === 'number' && Number.isFinite(booking.finalPricePreview)
+          ? booking.finalPricePreview
+          : 0;
+    const discountAppliedFlag = booking.discountApplied === true;
+    const discountAmount =
+      discountAppliedFlag &&
+      typeof booking.discountAmount === 'number' &&
+      Number.isFinite(booking.discountAmount)
+        ? booking.discountAmount
+        : 0;
+
+    // IMPORTANT: finalPricePreview already reflects the discount (if any) applied by
+    // applyAdminFirstServiceDiscount. Never subtract discountAmount a second time.
+    // We only fall back to (originalEstimated - discountAmount) if finalPricePreview
+    // is missing for legacy reasons.
+    const hasFinalPreview =
+      typeof booking.finalPricePreview === 'number' && Number.isFinite(booking.finalPricePreview);
+    const afterDiscount = hasFinalPreview
+      ? booking.finalPricePreview as number
+      : Math.max(0, Number((originalEstimated - discountAmount).toFixed(2)));
+
+    const quote = this.getQuoteRecord(booking) ?? {};
+    const quotedFromAdmin =
+      typeof (quote as { finalQuotedPrice?: unknown }).finalQuotedPrice === 'number' &&
+      Number.isFinite((quote as { finalQuotedPrice?: number }).finalQuotedPrice as number)
+        ? ((quote as { finalQuotedPrice: number }).finalQuotedPrice as number)
+        : null;
+    const finalAdminApprovedPrice =
+      quotedFromAdmin != null && quotedFromAdmin >= 0 ? quotedFromAdmin : afterDiscount;
+    if (!Number.isFinite(finalAdminApprovedPrice) || finalAdminApprovedPrice < 0) {
+      throw new InternalServerErrorException('Invalid booking price');
+    }
+
+    const adminDelta = finalAdminApprovedPrice - afterDiscount;
+    const manualAdjustments =
+      Array.isArray((quote as { manualAdjustments?: unknown[] }).manualAdjustments)
+        ? ((quote as { manualAdjustments: unknown[] }).manualAdjustments as unknown[])
+        : [];
+    const lastAdj = manualAdjustments.length
+      ? (manualAdjustments[manualAdjustments.length - 1] as { reason?: unknown } | undefined)
+      : undefined;
+    const reason = typeof lastAdj?.reason === 'string' ? lastAdj.reason : '';
+
+    const existingUrl =
+      typeof booking.paymentUrl === 'string' && booking.paymentUrl.trim().length > 0
+        ? booking.paymentUrl.trim()
+        : '';
+    if (existingUrl) {
+      await this.attachAssignedEmployeeMeta([booking]);
+      return {
+        booking: this.toFrontendBooking(booking),
+        wasAlreadyIssued: true,
+        stripeSessionId: null,
+        customerEmailSent: false,
+      };
+    }
+
+    const stripeCentsExpected = toStripeAmountCents(finalAdminApprovedPrice);
+    if (!Number.isSafeInteger(stripeCentsExpected) || stripeCentsExpected <= 0) {
+      throw new InternalServerErrorException('Invalid booking price');
+    }
+
+    const session = await this.stripeService.createCheckoutSessionDetails(booking, {
+      amount: finalAdminApprovedPrice,
+      quoteVersion: 'admin_confirmed',
+      quotedAmount: String(finalAdminApprovedPrice),
+    });
+    const amountTotalCents =
+      typeof session.amountTotal === 'number' ? session.amountTotal : null;
+    if (
+      amountTotalCents !== null &&
+      amountTotalCents !== stripeCentsExpected
+    ) {
+      throw new InternalServerErrorException(
+        `Stripe amount mismatch: expected ${stripeCentsExpected}c, got ${amountTotalCents}c`,
+      );
+    }
+
+    const now = new Date();
+    const baseCalculatedPrice =
+      typeof (quote as { baseCalculatedPrice?: unknown }).baseCalculatedPrice === 'number'
+        ? ((quote as { baseCalculatedPrice: number }).baseCalculatedPrice as number)
+        : originalEstimated;
+
+    booking.paymentUrl = session.url;
+    booking.paymentLifecycleStatus = 'payment_pending';
+    booking.commercialStatus = 'quote_accepted';
+    booking.finalAdminApprovedPrice = finalAdminApprovedPrice;
+    booking.adminAdjustedAmountUsd = adminDelta;
+    if (reason) booking.priceAdjustmentReason = reason;
+
+    booking.quote = {
+      ...(quote ?? {}),
+      version:
+        typeof (quote as { version?: unknown }).version === 'number' &&
+        (quote as { version: number }).version > 0
+          ? (quote as { version: number }).version
+          : 1,
+      status: 'accepted',
+      baseCalculatedPrice,
+      finalQuotedPrice: finalAdminApprovedPrice,
+      reviewedBy: this.resolveActorIdentifier(actor) || (quote as { reviewedBy?: unknown }).reviewedBy || undefined,
+      reviewedAt: (quote as { reviewedAt?: unknown }).reviewedAt ? (quote as { reviewedAt: Date }).reviewedAt : now,
+      confirmedAt: now,
+      sentAt: now,
+    } as typeof booking.quote;
+
+    const previous = legacyStatus;
+    const wanted: BookingStatus = 'confirmed';
+    const next = previous === wanted
+      ? wanted
+      : this.bookingStateService.transitionBooking({
+          current: previous,
+          next: wanted,
+          source: 'admin',
+        });
+    booking.status = next;
+
+    const paymentRecord = await this.paymentModel.findOneAndUpdate(
+      { bookingId: String(booking._id), provider: 'stripe' },
+      {
+        $setOnInsert: {
+          bookingId: String(booking._id),
+          provider: 'stripe',
+          status: 'pending',
+          amount: finalAdminApprovedPrice,
+          currency: session.currency ?? 'usd',
+        },
+        $set: {
+          checkoutSessionId: session.id,
+          paymentIntentId: session.paymentIntentId ?? undefined,
+        },
+      },
+      { upsert: true, new: true },
+    );
+    void paymentRecord;
+
+    const saved = await booking.save();
+
+    if (previous !== next && next === 'confirmed') {
+      this.eventEmitter.emit('booking.confirmed', {
+        ...this.toFrontendBooking(saved),
+        bookingId: String(saved._id),
+      });
+    }
+
+    await this.attachAssignedEmployeeMeta([saved]);
+
+    return {
+      booking: this.toFrontendBooking(saved),
+      wasAlreadyIssued: false,
+      stripeSessionId: session.id ?? null,
+      customerEmailSent: previous !== next && next === 'confirmed',
+    };
+  }
+
+  /**
+   * Admin cancellation: soft transition (booking record preserved).
+   * Cancels any pending payment lifecycle and emits the standard cancelled event.
+   */
+  async cancelByAdmin(
+    id: string,
+    actor?: AuthUser,
+    input?: { internalNotes?: string; cancellationReason?: string },
+  ): Promise<BookingDocument> {
+    const booking = await this.requireBookingById(id);
+    const now = new Date();
+    const alreadyCancelled =
+      booking.status === 'cancelled';
+
+    const wantedCommercial: BookingCommercialStatus = 'quote_rejected';
+    const validBeforeCommercial: readonly BookingCommercialStatus[] = [
+      'quote_requested',
+      'under_review',
+      'quoted_draft',
+      'quote_sent',
+      'quote_accepted',
+      'legacy_direct_booking',
+    ] as const;
+    const currentCommercial = this.getCommercialStatus(booking);
+    if (
+      !alreadyCancelled &&
+      (!currentCommercial || validBeforeCommercial.includes(currentCommercial))
+    ) {
+      booking.commercialStatus = wantedCommercial;
+    }
+    booking.paymentLifecycleStatus = 'voided';
+
+    if (!alreadyCancelled) {
+      const previous = booking.status;
+      const next = this.bookingStateService.transitionBooking({
+        current: previous,
+        next: 'cancelled',
+        source: 'admin',
+      });
+      booking.status = next;
+    }
+
+    const quote = this.getQuoteRecord(booking) ?? {};
+    booking.quote = {
+      ...(quote ?? {}),
+      version:
+        typeof (quote as { version?: unknown }).version === 'number' &&
+        (quote as { version: number }).version > 0
+          ? (quote as { version: number }).version
+          : 1,
+      status: 'rejected',
+      reviewedBy: this.resolveActorIdentifier(actor) || (quote as { reviewedBy?: unknown }).reviewedBy || undefined,
+      reviewedAt: (quote as { reviewedAt?: unknown }).reviewedAt ? (quote as { reviewedAt: Date }).reviewedAt : now,
+      rejectedAt: now,
+      internalNotes:
+        typeof input?.internalNotes === 'string'
+          ? input.internalNotes
+          : (quote as { internalNotes?: unknown }).internalNotes || undefined,
+      customerMessage:
+        typeof input?.cancellationReason === 'string'
+          ? input.cancellationReason
+          : (quote as { customerMessage?: unknown }).customerMessage || undefined,
+    } as typeof booking.quote;
+
+    const saved = await booking.save();
+
+    if (!alreadyCancelled) {
+      this.eventEmitter.emit('booking.cancelled', {
+        ...this.toFrontendBooking(saved),
+        bookingId: String(saved._id),
+      });
+      this.emitBookingQuoteRejectedEvent(saved);
+    }
+
+    return saved;
+  }
+
+  /**
+   * Admin PERMANENT deletion of a booking record.
+   *
+   * SECURITY: Requires an ADDITIONAL re-authentication check via
+   * AuthService.verifyCredentialsOnly(email, password) bcrypt validation,
+   * on top of the existing JWT + Roles(ADMIN) guard at the controller.
+   * The delete NEVER happens before credentials are verified.
+   */
+  async deleteAdminPermanent(
+    id: string,
+    reAuth: { email: string; password: string },
+    authUser: AuthUser,
+  ): Promise<{ deletedId: string; deletedPayments: number; verifiedBy: string }> {
+    if (!isValidObjectId(id)) {
+      throw new BadRequestException('Invalid booking id');
+    }
+
+    const reAuthEmail = String(reAuth?.email ?? '').trim().toLowerCase();
+    const reAuthPassword = String(reAuth?.password ?? '');
+    if (!reAuthEmail || !reAuthPassword) {
+      throw new BadRequestException(
+        'Re-authentication credentials (email, password) are required',
+      );
+    }
+
+    const verified = await this.authService.verifyCredentialsOnly(reAuthEmail, reAuthPassword);
+    if (verified.role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Re-authenticated user is not an administrator');
+    }
+    const jwtRole = authUser?.role;
+    if (jwtRole !== UserRole.ADMIN) {
+      throw new ForbiddenException('Authenticated JWT user is not an administrator');
+    }
+
+    const booking = await this.bookingModel.findById(id);
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+    const bookingId = String(booking._id);
+
+    const paymentsResult = await this.paymentModel.deleteMany({
+      bookingId,
+      provider: 'stripe',
+    });
+    const deletedPayments =
+      typeof paymentsResult?.deletedCount === 'number' ? paymentsResult.deletedCount : 0;
+
+    await this.bookingModel.findByIdAndDelete(bookingId);
+
+    this.logger.log(
+      JSON.stringify({
+        event: 'booking.admin_permanent_delete',
+        bookingId,
+        verifiedByEmail: verified.email,
+        jwtUserEmail: authUser?.email ?? null,
+        deletedPayments,
+      }),
+    );
+
+    return {
+      deletedId: bookingId,
+      deletedPayments,
+      verifiedBy: verified.email,
+    };
+  }
+
   async getBookings(
     status?: BookingStatus,
   ): Promise<Record<string, unknown>[]> {
@@ -562,8 +1928,8 @@ export class BookingService {
     const normalizedEmployeeIds = Array.from(
       new Set(employeeIds.map((id) => id.trim()).filter((id) => id)),
     );
-    if (normalizedEmployeeIds.length === 0) {
-      throw new BadRequestException('employeeIds is required');
+    if (normalizedEmployeeIds.length === 0 && !supervisorId) {
+      throw new BadRequestException('At least one supervisorId or one employeeId is required');
     }
     for (const id of normalizedEmployeeIds) {
       if (!isValidObjectId(id)) {
@@ -575,18 +1941,21 @@ export class BookingService {
       throw new BadRequestException('Invalid supervisor id');
     }
 
-    const employeesMap =
-      await this.employeesService.getActiveEmployeesWithUserMeta(
-        normalizedEmployeeIds,
-      );
+    let employeesMap: Map<string, { userRole: UserRole | undefined; employee: unknown; userEmail?: string }> = new Map();
+    if (normalizedEmployeeIds.length > 0) {
+      employeesMap =
+        await this.employeesService.getActiveEmployeesWithUserMeta(
+          normalizedEmployeeIds,
+        );
 
-    for (const id of normalizedEmployeeIds) {
-      const meta = employeesMap.get(id);
-      if (!meta) {
-        throw new NotFoundException('Employee not found');
-      }
-      if (meta.userRole !== UserRole.EMPLOYEE) {
-        throw new BadRequestException('Employees must have employee role');
+      for (const id of normalizedEmployeeIds) {
+        const meta = employeesMap.get(id);
+        if (!meta) {
+          throw new NotFoundException('Employee not found');
+        }
+        if (meta.userRole !== UserRole.EMPLOYEE) {
+          throw new BadRequestException('Employees must have employee role');
+        }
       }
     }
 
@@ -643,27 +2012,49 @@ export class BookingService {
       return booking;
     }
 
-    const assignedEmployeesSnapshot = normalizedEmployeeIds.map((id) => {
-      const meta = employeesMap.get(id);
-      const employee = meta?.employee;
-      return {
-        employeeId: employee?._id,
-        name:
-          employee && typeof employee.name === 'string'
-            ? employee.name.trim()
-            : '',
-        role: meta?.userRole ?? UserRole.EMPLOYEE,
-      };
-    });
+    const assignedEmployeesSnapshot = normalizedEmployeeIds.length > 0
+      ? normalizedEmployeeIds.map((id) => {
+          const meta = employeesMap.get(id);
+          const employee = meta?.employee as { _id?: unknown; name?: unknown } | undefined;
+          return {
+            employeeId: employee?._id,
+            name:
+              employee && typeof employee.name === 'string'
+                ? employee.name.trim()
+                : '',
+            role: meta?.userRole ?? UserRole.EMPLOYEE,
+          };
+        })
+      : Array.isArray(booking.assignedEmployees)
+        ? (booking.assignedEmployees as unknown as Array<{ employeeId: unknown; name: string; role?: string }>)
+        : [];
 
     const primaryEmployeeId = normalizedEmployeeIds[0];
-    const primaryMeta = employeesMap.get(primaryEmployeeId);
-    const primaryEmployee = primaryMeta?.employee;
-    const primaryEmail = primaryMeta?.userEmail ?? '';
-    const primaryName =
-      primaryEmployee && typeof primaryEmployee.name === 'string'
-        ? primaryEmployee.name.trim()
-        : '';
+    const existingEmployees = Array.isArray(booking.assignedEmployees)
+      ? booking.assignedEmployees
+      : [];
+    let primaryName = '';
+    let primaryEmail = '';
+    let primaryEmployee: { _id?: unknown } | undefined = undefined;
+    if (normalizedEmployeeIds.length > 0 && primaryEmployeeId) {
+      const primaryMeta = employeesMap.get(primaryEmployeeId);
+      primaryEmployee = primaryMeta?.employee as { _id?: unknown } | undefined;
+      primaryEmail = primaryMeta?.userEmail ?? '';
+      primaryName =
+        primaryEmployee && typeof (primaryEmployee as { name?: unknown }).name === 'string'
+          ? String((primaryEmployee as { name: string }).name).trim()
+          : '';
+    } else if (existingEmployees.length > 0 && booking.assignedEmployeeName) {
+      // Supervisor-only: preserve existing assigned employee meta (if any) without overwriting.
+      primaryEmployee =
+        typeof booking.assignedEmployeeId !== 'undefined' && booking.assignedEmployeeId !== null
+          ? ({ _id: booking.assignedEmployeeId } as { _id: unknown })
+          : undefined;
+      primaryEmail =
+        typeof booking.assignedEmployeeEmail === 'string' ? booking.assignedEmployeeEmail : '';
+      primaryName =
+        typeof booking.assignedEmployeeName === 'string' ? booking.assignedEmployeeName : '';
+    }
 
     const baseFilter = {
       _id: booking._id,
@@ -671,13 +2062,17 @@ export class BookingService {
       paymentStatus: { $ne: 'paid' },
     };
 
-    const updateCore = {
-      assignedEmployees: assignedEmployeesSnapshot,
-      assignedEmployeeId: primaryEmployee?._id,
-      assignedEmployeeEmail: primaryEmail,
-      assignedEmployeeName: primaryName,
+    const updateCore: Record<string, unknown> = {
       status: 'assigned' as const,
     };
+    // Only overwrite employee fields when an employee assignment is actually being set.
+    // Otherwise (supervisor-only) we keep the persisted employee assignment intact.
+    if (normalizedEmployeeIds.length > 0) {
+      updateCore['assignedEmployees'] = assignedEmployeesSnapshot;
+      if (primaryEmployee?._id) updateCore['assignedEmployeeId'] = primaryEmployee._id;
+      updateCore['assignedEmployeeEmail'] = primaryEmail;
+      updateCore['assignedEmployeeName'] = primaryName;
+    }
 
     const update: Record<string, unknown> = { $set: updateCore };
     if (supervisorSnapshot) {
@@ -935,6 +2330,143 @@ export class BookingService {
     return (email ?? '').toLowerCase().trim();
   }
 
+  /**
+   * Obtiene un booking validando primero el ObjectId.
+   * Reutiliza esta validacion en el quote-workflow para evitar divergencias.
+   */
+  private async requireBookingById(id: string): Promise<BookingDocument> {
+    if (!isValidObjectId(id)) {
+      throw new BadRequestException('Invalid booking id');
+    }
+
+    const booking = await this.bookingModel.findById(id);
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    return booking;
+  }
+
+  /**
+   * Lee de forma segura el estado comercial actual.
+   */
+  private getCommercialStatus(
+    booking: BookingDocument,
+  ): BookingCommercialStatus | null {
+    return typeof booking.commercialStatus === 'string'
+      ? booking.commercialStatus
+      : null;
+  }
+
+  /**
+   * Helper defensivo para tratar `quote` como un record parcial mientras el
+   * modelo convive con documentos legacy que aun no lo tienen.
+   */
+  private getQuoteRecord(
+    booking: BookingDocument,
+  ): Record<string, unknown> | null {
+    if (!booking.quote || typeof booking.quote !== 'object') {
+      return null;
+    }
+    return booking.quote as unknown as Record<string, unknown>;
+  }
+
+  /**
+   * Valida transiciones del workflow comercial sin tocar la maquina de estados
+   * legacy de `Booking.status`.
+   */
+  private assertCommercialTransition(
+    current: BookingCommercialStatus | null,
+    next: BookingCommercialStatus,
+    allowedFrom: BookingCommercialStatus[],
+  ): void {
+    if (current === next) {
+      return;
+    }
+
+    if (!current) {
+      throw new ConflictException(
+        'Commercial workflow is not initialized for this booking',
+      );
+    }
+
+    if (!allowedFrom.includes(current)) {
+      throw new ConflictException(
+        `Invalid commercial status transition: ${current} -> ${next}`,
+      );
+    }
+  }
+
+  /**
+   * Identificador simple del actor administrativo.
+   * Preferimos email para trazabilidad humana; si no existe, usamos sub.
+   */
+  private resolveActorIdentifier(actor?: AuthUser): string {
+    const email =
+      typeof actor?.email === 'string' ? this.normalizeEmail(actor.email) : '';
+    if (email) return email;
+    return typeof actor?.sub === 'string' ? actor.sub : '';
+  }
+
+  /**
+   * Determina si una confirmacion operativa debe seguir disparando Stripe bajo
+   * las reglas legacy de pago inmediato.
+   *
+   * COMPATIBILIDAD:
+   * - Bookings sin `commercialStatus` o marcados como `legacy_direct_booking`
+   *   conservan el comportamiento historico.
+   * - Bookings del quote-flow NO generan checkout al confirmarse
+   *   operativamente; el checkout pasa a depender de PaymentsService.
+   */
+  private shouldAutoCreateStripeOnConfirm(booking: BookingDocument): boolean {
+    const commercialStatus = this.getCommercialStatus(booking);
+    return (
+      commercialStatus === null || commercialStatus === 'legacy_direct_booking'
+    );
+  }
+
+  /**
+   * Comprueba si el body de draft trae al menos una mutacion significativa.
+   */
+  private hasMeaningfulQuoteDraftInput(input: {
+    baseCalculatedPrice?: number;
+    finalQuotedPrice?: number;
+    manualAdjustments?: unknown[];
+    discountType?: AdminQuoteDiscountType;
+    discountReason?: string;
+    expiresAt?: string;
+    customerMessage?: string;
+    internalNotes?: string;
+  }): boolean {
+    return (
+      input.baseCalculatedPrice !== undefined ||
+      input.finalQuotedPrice !== undefined ||
+      (Array.isArray(input.manualAdjustments) &&
+        input.manualAdjustments.length > 0) ||
+      (typeof input.discountType === 'string' &&
+        input.discountType.trim().length > 0) ||
+      (typeof input.discountReason === 'string' &&
+        input.discountReason.trim().length > 0) ||
+      (typeof input.expiresAt === 'string' &&
+        input.expiresAt.trim().length > 0) ||
+      (typeof input.customerMessage === 'string' &&
+        input.customerMessage.trim().length > 0) ||
+      (typeof input.internalNotes === 'string' &&
+        input.internalNotes.trim().length > 0)
+    );
+  }
+
+  /**
+   * Parsea fechas ISO simples usadas por el workflow comercial.
+   */
+  private parseQuoteDate(value: string, fieldName: string): Date {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(`${fieldName} must be a valid ISO date`);
+    }
+    return parsed;
+  }
+
   private async attachAssignedEmployeeMeta(bookings: BookingDocument[]) {
     const employeeIds: string[] = [];
     for (const booking of bookings) {
@@ -1169,6 +2701,27 @@ export class BookingService {
     });
   }
 
+  private emitBookingQuoteRequestedEvent(booking: BookingDocument) {
+    this.eventEmitter.emit('booking.quote_requested', {
+      ...this.toFrontendBooking(booking),
+      bookingId: String(booking._id),
+    });
+  }
+
+  private emitBookingQuoteSentEvent(booking: BookingDocument) {
+    this.eventEmitter.emit('booking.quote_sent', {
+      ...this.toFrontendBooking(booking),
+      bookingId: String(booking._id),
+    });
+  }
+
+  private emitBookingQuoteRejectedEvent(booking: BookingDocument) {
+    this.eventEmitter.emit('booking.quote_rejected', {
+      ...this.toFrontendBooking(booking),
+      bookingId: String(booking._id),
+    });
+  }
+
   private async createWithDiscountTransaction(
     data: Omit<
       CreateBookingDto,
@@ -1230,9 +2783,11 @@ export class BookingService {
     >,
     normalizedAddress: string,
     pricing: { estimatedPrice: number; finalPrice: number },
+    extraFields?: Record<string, unknown>,
   ): Promise<BookingDocument> {
     const bookingPayload = {
       ...data,
+      ...(extraFields ?? {}),
       status: 'pending' as const,
       applyFirstDiscount: false,
       estimatedPrice: pricing.estimatedPrice,
@@ -1403,6 +2958,7 @@ export class BookingService {
     data: CreateBookingDto,
     discountApplied: boolean,
     distanceFee: number,
+    geo?: GeoPricingResult | null,
   ): {
     estimatedPrice: number;
     finalPrice: number;
@@ -1414,6 +2970,44 @@ export class BookingService {
     extrasTotal: number;
     petsFee: number;
     distanceFee: number;
+    specialServiceFee?: number;
+    borderlineFee?: number;
+    pricingModel?: 'V1' | 'V2';
+  } {
+    const version = this.readStringField(data, 'pricingModelVersion');
+    if (version === 'V2') {
+      return this.calculatePricingBreakdownV2(
+        data,
+        discountApplied,
+        distanceFee,
+        geo,
+      );
+    }
+    return this.calculatePricingBreakdownV1(data, discountApplied, distanceFee);
+  }
+
+  /**
+   * @description V1 LEGACY PRICING ENGINE – 6 cleaningType alternativos.
+   * NO MODIFICAR. Preservado para: tests, bookings históricos leídos por
+   * buildDisplayPricing(), y cualquier cliente legacy que siga enviando
+   * slugs standard/deep/move/apartment/post-construction/window.
+   */
+  private calculatePricingBreakdownV1(
+    data: CreateBookingDto,
+    discountApplied: boolean,
+    distanceFee: number,
+  ): {
+    estimatedPrice: number;
+    finalPrice: number;
+    baseServicePrice: number;
+    additionalBedroomsFee: number;
+    discountedEstimatedPrice: number;
+    discountPercent: number;
+    discountAmount: number;
+    extrasTotal: number;
+    petsFee: number;
+    distanceFee: number;
+    pricingModel: 'V1';
   } {
     const nodeEnv =
       typeof process.env.NODE_ENV === 'string' ? process.env.NODE_ENV : '';
@@ -1427,7 +3021,7 @@ export class BookingService {
       this.readStringField(data, 'cleaningType');
     const normalizedService = this.normalizeServiceType(rawService);
 
-    log('[PRICING SERVICE TYPE]', {
+    log('[PRICING V1 SERVICE TYPE]', {
       raw: rawService || 'UNKNOWN',
       normalized: normalizedService,
       serviceType: this.readStringField(data, 'serviceType') || undefined,
@@ -1437,7 +3031,7 @@ export class BookingService {
     const extrasResult = this.calculateExtras(
       this.readUnknownField(data, 'extras'),
     );
-    log('[PRICING EXTRAS BREAKDOWN]', extrasResult);
+    log('[PRICING V1 EXTRAS BREAKDOWN]', extrasResult);
 
     const petsFee = this.readBooleanField(data, 'petsAtHome') ? 10 : 0;
     const normalizedDistanceFee =
@@ -1467,13 +3061,13 @@ export class BookingService {
         );
         baseServicePrice = result.baseServicePrice;
         additionalBedroomsFee = result.additionalBedroomsFee;
-        log('[PRICING BASE]', {
+        log('[PRICING V1 BASE]', {
           service: 'STANDARD',
           bedrooms,
           bathrooms,
           baseServicePrice,
         });
-        log('[PRICING ADDITIONALS]', {
+        log('[PRICING V1 ADDITIONALS]', {
           service: 'STANDARD',
           additionalBedrooms,
           additionalBedroomsFee,
@@ -1487,13 +3081,13 @@ export class BookingService {
         );
         baseServicePrice = result.baseServicePrice;
         additionalBedroomsFee = result.additionalBedroomsFee;
-        log('[PRICING BASE]', {
+        log('[PRICING V1 BASE]', {
           service: 'DEEP',
           bedrooms,
           bathrooms,
           baseServicePrice,
         });
-        log('[PRICING ADDITIONALS]', {
+        log('[PRICING V1 ADDITIONALS]', {
           service: 'DEEP',
           additionalBedrooms,
           additionalBedroomsFee,
@@ -1507,13 +3101,13 @@ export class BookingService {
         );
         baseServicePrice = result.baseServicePrice;
         additionalBedroomsFee = result.additionalBedroomsFee;
-        log('[PRICING BASE]', {
+        log('[PRICING V1 BASE]', {
           service: 'APARTMENT',
           bedrooms,
           bathrooms,
           baseServicePrice,
         });
-        log('[PRICING ADDITIONALS]', {
+        log('[PRICING V1 ADDITIONALS]', {
           service: 'APARTMENT',
           additionalBedrooms,
           additionalBedroomsFee,
@@ -1530,7 +3124,7 @@ export class BookingService {
         );
         baseServicePrice = result.baseServicePrice;
         additionalBedroomsFee = result.additionalBedroomsFee;
-        log('[PRICING BASE]', {
+        log('[PRICING V1 BASE]', {
           service: 'MOVE',
           moveMode,
           bedrooms,
@@ -1538,7 +3132,7 @@ export class BookingService {
           baseServicePrice,
           moveBreakdown: result.breakdown,
         });
-        log('[PRICING ADDITIONALS]', {
+        log('[PRICING V1 ADDITIONALS]', {
           service: 'MOVE',
           moveMode,
           additionalBedrooms,
@@ -1557,13 +3151,13 @@ export class BookingService {
         1,
       );
       baseServicePrice = this.calculatePostConstruction(hours, cleaners);
-      log('[PRICING BASE]', {
+      log('[PRICING V1 BASE]', {
         service: 'POST_CONSTRUCTION',
         hours,
         cleaners,
         baseServicePrice,
       });
-      log('[PRICING ADDITIONALS]', {
+      log('[PRICING V1 ADDITIONALS]', {
         service: 'POST_CONSTRUCTION',
         additionalBedrooms: 0,
         additionalBedroomsFee: 0,
@@ -1575,12 +3169,12 @@ export class BookingService {
         1,
       );
       baseServicePrice = this.calculateWindow(windowCount);
-      log('[PRICING BASE]', {
+      log('[PRICING V1 BASE]', {
         service: 'WINDOW',
         windowCount,
         baseServicePrice,
       });
-      log('[PRICING ADDITIONALS]', {
+      log('[PRICING V1 ADDITIONALS]', {
         service: 'WINDOW',
         additionalBedrooms: 0,
         additionalBedroomsFee: 0,
@@ -1601,7 +3195,7 @@ export class BookingService {
       ? this.roundCurrency(estimatedPrice - discountedEstimatedPrice)
       : 0;
 
-    log('[PRICING DISCOUNT]', {
+    log('[PRICING V1 DISCOUNT]', {
       discountApplied,
       discountPercent,
       estimatedPrice,
@@ -1614,7 +3208,7 @@ export class BookingService {
       discountedEstimatedPrice + extrasTotal + petsFee + normalizedDistanceFee;
     const finalPrice = this.roundCurrency(finalPriceRaw);
 
-    log('[PRICING FINAL]', {
+    log('[PRICING V1 FINAL]', {
       estimatedPrice,
       finalPrice,
       components: {
@@ -1636,7 +3230,353 @@ export class BookingService {
       extrasTotal,
       petsFee,
       distanceFee: normalizedDistanceFee,
+      pricingModel: 'V1',
     };
+  }
+
+  /**
+   * @description V2 NEW PRICING ENGINE.
+   * Modelo conceptual:
+   *  Regular Cleaning Base Price
+   *  + Extra Bedrooms ($40 c/u)
+   *  + Special Service (0 ó 1, flat fee)
+   *  + Optional Extras compatibles
+   *  + Borderline fee ($25 si aplica)
+   * Service Notes = $0 siempre.
+   * First-time discount se mantiene igual a V1 por ahora (sección 12).
+   */
+  private calculatePricingBreakdownV2(
+    data: CreateBookingDto,
+    discountApplied: boolean,
+    distanceFee: number,
+    geo?: GeoPricingResult | null,
+  ): {
+    estimatedPrice: number;
+    finalPrice: number;
+    baseServicePrice: number;
+    additionalBedroomsFee: number;
+    discountedEstimatedPrice: number;
+    discountPercent: number;
+    discountAmount: number;
+    extrasTotal: number;
+    petsFee: number;
+    distanceFee: number;
+    specialServiceFee: number;
+    borderlineFee: number;
+    pricingModel: 'V2';
+  } {
+    const nodeEnv =
+      typeof process.env.NODE_ENV === 'string' ? process.env.NODE_ENV : '';
+    const debugPricing =
+      nodeEnv !== 'production' && process.env.DEBUG_PRICING === '1';
+    const log = debugPricing ? console.log : () => undefined;
+
+    log('[PRICING V2 START]');
+
+    // ============================================================
+    // 1. REGULAR CLEANING BASE
+    // ============================================================
+    const packageIdRaw = this.readStringField(data, 'regularCleaningPackageId');
+    const packageFromCatalog =
+      typeof packageIdRaw === 'string' && packageIdRaw.trim().length > 0
+        ? REGULAR_CLEANING_PACKAGES_V2.find(p => p.id === packageIdRaw.trim()) ?? null
+        : null;
+
+    let bedrooms: number;
+    let bathrooms: number;
+    if (packageFromCatalog) {
+      bedrooms = packageFromCatalog.bedrooms;
+      bathrooms = packageFromCatalog.bathrooms;
+    } else if (packageIdRaw && /^(\d+)[-\/](\d+)$/.test(packageIdRaw)) {
+      const match = packageIdRaw.match(/^(\d+)[-\/](\d+)$/);
+      bedrooms = Number(match![1]);
+      bathrooms = Number(match![2]);
+    } else {
+      bedrooms = this.readRequiredIntField(data, 'bedrooms', 1);
+      bathrooms = this.readRequiredIntField(data, 'bathrooms', 1);
+    }
+    const key = `${bedrooms}/${bathrooms}`;
+    const baseServicePrice = this.lookupTablePrice(
+      REGULAR_CLEANING_BASE_PRICES_V2,
+      bedrooms,
+      bathrooms,
+    );
+    log('[PRICING V2 REGULAR BASE]', {
+      packageId: packageIdRaw ?? null,
+      packageFromCatalog: !!packageFromCatalog,
+      key,
+      bedrooms,
+      bathrooms,
+      baseServicePrice,
+    });
+
+    // ============================================================
+    // 2. EXTRA BEDROOMS (+$40 c/u)
+    // ============================================================
+    const additionalBedrooms = this.readIntField(data, 'additionalBedrooms', 0);
+    const additionalBedroomsFee =
+      this.safeNonNegativeInt(additionalBedrooms) * EXTRA_BEDROOM_PRICE_V2;
+    log('[PRICING V2 EXTRA BEDROOMS]', {
+      additionalBedrooms,
+      additionalBedroomsFee,
+      perBedroom: EXTRA_BEDROOM_PRICE_V2,
+    });
+
+    // ============================================================
+    // 3. SPECIAL SERVICE (0 ó 1 – flat fee)
+    // ============================================================
+    const specialServiceRaw = this.readStringField(data, 'specialServiceId');
+    const ssNormalized =
+      typeof specialServiceRaw === 'string' ? specialServiceRaw.trim() : '';
+    let specialServiceFee = 0;
+    if (ssNormalized) {
+      const ss = SPECIAL_SERVICES_V2[ssNormalized as SpecialServiceIdV2];
+      if (!ss) {
+        throw new BadRequestException(
+          `Unknown specialServiceId: ${ssNormalized}`,
+        );
+      }
+      specialServiceFee = ss.flatFee;
+    }
+    log('[PRICING V2 SPECIAL SERVICE]', {
+      specialServiceId: ssNormalized || null,
+      specialServiceFee,
+    });
+
+    // ============================================================
+    // 4. OPTIONAL EXTRAS V2 (con catalogo + compatibilidad + excluyentes + max qty)
+    // ============================================================
+    const extrasV2Result = this.calculateExtrasV2(
+      this.readUnknownField(data, 'extras'),
+      ssNormalized ? (ssNormalized as SpecialServiceIdV2) : null,
+    );
+    const extrasTotal = this.roundCurrency(extrasV2Result.total);
+    log('[PRICING V2 EXTRAS]', {
+      extrasTotal,
+      items: extrasV2Result.items,
+    });
+
+    // ============================================================
+    // 5. SERVICE NOTES (siempre $0)
+    // ============================================================
+    const petsFee = SERVICE_NOTES_FEE_V2;
+    log('[PRICING V2 SERVICE NOTES FEE]', { petsFee });
+
+    // ============================================================
+    // 6. BORDERLINE FEE V2 ($25) — Clasificación DETERMINISTA V2:
+    //      INSIDE  → distance <= zone.radius  → $0
+    //      BORDERLINE → zone.radius < distance <= zone.radius + 1km  → $25
+    //      OUTSIDE → distance > zone.radius + 1km  → fuera de servicio
+    //
+    // Prioridad (menor a mayor):
+    //   a) distanceFee legacy (fallback si no hay clasificación V2)
+    //   b) data.borderlineFee explícita de FE
+    //   c) geo?.coverageClassification V2 (server-side truth)
+    //
+    // SEGURIDAD FINAL: Si la clasificación V2 dice INSIDE,
+    // borderlineFee se fuerza a $0 INCONDICIONALMENTE — ninguna otra
+    // regla (isBorderline V1, distanceFee, explicit FE) puede imponer
+    // el cargo de $25 cuando al menos una zona clasifica la coord.
+    // como INSIDE.
+    // ============================================================
+    const explicitBorderline = this.readUnknownField(data, 'borderlineFee');
+    let borderlineFee = 0;
+    let classificationSource = 'default_inside';
+    if (geo && typeof geo.coverageClassification === 'string') {
+      classificationSource = 'geo_v2_classification';
+      if (
+        geo.v2BorderlineFeeApplicable === true ||
+        geo.coverageClassification === 'BORDERLINE'
+      ) {
+        borderlineFee = this.geoPricingService.BORDERLINE_FEE_V2_AMOUNT;
+      } else {
+        borderlineFee = 0;
+      }
+      // ------------------------------------------------------------------
+      // SANITY CHECK FINAL (INCONDICIONAL):
+      // Si la clasificación global V2 es INSIDE (cualquier zona dentro)
+      // borderlineFee DEBE ser 0. Ninguna otra fuente tiene prioridad.
+      // ------------------------------------------------------------------
+      if (geo.coverageClassification === 'INSIDE') {
+        borderlineFee = 0;
+        classificationSource = 'geo_v2_classification_inside_forced_0';
+      }
+    } else if (
+      typeof explicitBorderline === 'number' &&
+      Number.isFinite(explicitBorderline)
+    ) {
+      borderlineFee = this.roundCurrency(Math.max(0, explicitBorderline));
+      classificationSource = 'explicit_field';
+    } else if (
+      typeof distanceFee === 'number' &&
+      Number.isFinite(distanceFee) &&
+      distanceFee > 0
+    ) {
+      borderlineFee = BORDERLINE_FEE_AMOUNT_V2;
+      classificationSource = 'distance_fee_fallback';
+    }
+    log('[PRICING V2 BORDERLINE]', {
+      borderlineFee,
+      classificationSource,
+      coverageClassification:
+        geo && typeof geo.coverageClassification === 'string'
+          ? geo.coverageClassification
+          : null,
+      v2BorderlineFeeApplicable: geo?.v2BorderlineFeeApplicable ?? null,
+      closestZoneName: geo?.closestZoneName ?? null,
+      closestZoneDistanceKm: geo?.closestZoneDistanceKm ?? null,
+    });
+
+    // ============================================================
+    // 7. SUBTOTALES Y DESCUENTO
+    // ============================================================
+    // V2: estimatedPrice = FULL UNDISCOUNTED SUBTOTAL per catalog spec:
+    // Regular Base + Extra Bedrooms + Special Service + Extras + Notes + Borderline.
+    // Discount se aplica SOBRE el subtotal completo.
+    const estimatedPriceRaw =
+      baseServicePrice +
+      additionalBedroomsFee +
+      specialServiceFee +
+      extrasTotal +
+      petsFee +
+      borderlineFee;
+    const estimatedPrice = this.roundCurrency(estimatedPriceRaw);
+
+    const discountPercent = this.getFirstTimeDiscountPercent();
+    const discountedEstimatedRaw = discountApplied
+      ? estimatedPrice * (1 - discountPercent / 100)
+      : estimatedPrice;
+    const discountedEstimatedPrice = this.roundCurrency(discountedEstimatedRaw);
+    const discountAmount = discountApplied
+      ? this.roundCurrency(estimatedPrice - discountedEstimatedPrice)
+      : 0;
+
+    log('[PRICING V2 DISCOUNT]', {
+      discountApplied,
+      discountPercent,
+      estimatedPrice,
+      discountedEstimatedPrice,
+      discountAmount,
+    });
+
+    // ============================================================
+    // 8. FINAL PRICE
+    // ============================================================
+    // V2: finalPrice = discountedEstimatedPrice (todos los componentes
+    // ya estan dentro de estimatedPrice / discountedEstimatedPrice).
+    const finalPriceRaw = discountedEstimatedPrice;
+    const finalPrice = this.roundCurrency(finalPriceRaw);
+    log('[PRICING V2 FINAL]', {
+      estimatedPrice,
+      finalPrice,
+      components: {
+        discountedEstimatedPrice,
+        specialServiceFee,
+        extrasTotal,
+        petsFee,
+        borderlineFee,
+      },
+    });
+
+    return {
+      estimatedPrice,
+      finalPrice,
+      baseServicePrice: this.roundCurrency(baseServicePrice),
+      additionalBedroomsFee: this.roundCurrency(additionalBedroomsFee),
+      discountedEstimatedPrice,
+      discountPercent,
+      discountAmount,
+      extrasTotal,
+      petsFee,
+      distanceFee: 0,
+      specialServiceFee,
+      borderlineFee,
+      pricingModel: 'V2',
+    };
+  }
+
+  private calculateExtrasV2(
+    extrasRaw: unknown,
+    specialServiceId: SpecialServiceIdV2 | null,
+  ): {
+    total: number;
+    items: Array<{
+      type: string;
+      quantity: number;
+      unitPrice: number;
+      subtotal: number;
+    }>;
+  } {
+    const extras = Array.isArray(extrasRaw) ? extrasRaw : [];
+    const items: Array<{
+      type: string;
+      quantity: number;
+      unitPrice: number;
+      subtotal: number;
+    }> = [];
+    let total = 0;
+    const selectedIds = new Set<OptionalExtraIdV2>();
+
+    for (const extra of extras) {
+      let type = '';
+      let quantity = 1;
+
+      if (typeof extra === 'string') {
+        type = extra.trim().toLowerCase();
+      } else if (typeof extra === 'object' && extra !== null) {
+        const typeValue = (extra as { type?: unknown }).type;
+        const quantityValue = (extra as { quantity?: unknown }).quantity;
+        type =
+          typeof typeValue === 'string' ? typeValue.trim().toLowerCase() : '';
+        if (quantityValue != null) {
+          quantity = this.safePositiveInt(quantityValue, 1);
+        }
+      } else {
+        throw new BadRequestException('Invalid extras format');
+      }
+      if (!type) throw new BadRequestException('Invalid extra type');
+
+      const def = OPTIONAL_EXTRAS_V2[type as OptionalExtraIdV2];
+      if (!def) {
+        throw new BadRequestException(`Unknown V2 extra: ${type}`);
+      }
+      if (!isExtraCompatibleV2(def.id, specialServiceId)) {
+        throw new BadRequestException(
+          `Extra "${def.id}" is not compatible with the current service selection`,
+        );
+      }
+      if (def.kind === 'qty') {
+        const maxQty =
+          EXTRA_MAX_QUANTITY_V2[def.id] ??
+          def.maxQuantity ??
+          Number.POSITIVE_INFINITY;
+        if (quantity > maxQty) {
+          throw new BadRequestException(
+            `Extra "${def.id}" exceeds maximum allowed quantity (${maxQty})`,
+          );
+        }
+      }
+      if (items.some((x) => x.type === type)) {
+        throw new BadRequestException(`Duplicated extra: ${type}`);
+      }
+      selectedIds.add(def.id);
+      const unitPrice = def.unitPrice;
+      const subtotal = unitPrice * quantity;
+      items.push({ type, quantity, unitPrice, subtotal });
+      total += subtotal;
+    }
+
+    // Reglas excluyentes (Garage / Full Garage)
+    for (const group of MUTUALLY_EXCLUSIVE_EXTRA_GROUPS_V2) {
+      const present = group.filter((id) => selectedIds.has(id));
+      if (present.length > 1) {
+        throw new BadRequestException(
+          `Mutually exclusive extras cannot be selected together: ${present.join(', ')}`,
+        );
+      }
+    }
+
+    return { total, items };
   }
 
   private calculateStandard(
@@ -1846,15 +3786,24 @@ export class BookingService {
 
   private getExtraUnitPrice(type: string): number {
     const normalized = type.toLowerCase().trim();
-    if (normalized === 'fridge') return 30;
+    if (normalized === 'fridge' || normalized === 'refrigerator') return 30;
     if (normalized === 'oven') return 30;
     if (normalized === 'cabinets') return 35;
-    if (normalized === 'heavy') return 25;
+    if (normalized === 'heavy' || normalized === 'heavy_furniture_moving') return 25;
     if (normalized === 'same_day') return 20;
     if (normalized === 'garage') return 30;
-    if (normalized === 'organize') return 30;
+    if (normalized === 'full_garage') return 70;
+    if (normalized === 'organize' || normalized === 'closet_organization') return 30;
     if (normalized === 'laundry') return 15;
-    if (normalized === 'outside_windows') return 8;
+    if (normalized === 'outside_windows' || normalized === 'outside_window') return 8;
+
+    const fromCatalog = (OPTIONAL_EXTRAS_V2 as Record<string, { unitPrice?: number } | undefined>)[
+      normalized
+    ]?.unitPrice;
+    if (typeof fromCatalog === 'number' && !Number.isNaN(fromCatalog) && fromCatalog >= 0) {
+      return fromCatalog;
+    }
+
     throw new BadRequestException(`Unknown extra: ${type}`);
   }
 
@@ -2022,6 +3971,66 @@ export class BookingService {
     return parsed;
   }
 
+  /**
+   * § SINGLE SOURCE OF TRUTH — Admin quote discount type → fixed percentage.
+   *
+   * § SURGICAL FIX (hard-fixed per business rule):
+   * Admin quote fixed discount mapping is HARDCODED and never comes from
+   * env vars, frontend payload, or any external input.
+   *
+   *   none                = 0%
+   *   regular_client      = 10%
+   *   first_time_customer = 15%   ← ALWAYS 15 (env FIRST_TIME_DISCOUNT_PERCENT
+   *                                        intentionally NOT consulted for
+   *                                        the Admin quote fixed-discount rule)
+   *   loyalty_customer    = 20%
+   *
+   * @throws BadRequestException for unknown identifiers — do NOT silently coerce unknown types to 0.
+   */
+  resolveAdminQuoteDiscountPercent(
+    discountType: AdminQuoteDiscountType,
+  ): number {
+    switch (discountType) {
+      case 'none':
+        return 0;
+      case 'regular_client':
+        return 10;
+      case 'first_time_customer':
+        return 15;
+      case 'loyalty_customer':
+        return 20;
+      default: {
+        const never: never = discountType;
+        throw new BadRequestException(
+          `Unknown discountType: ${String(never)}. Allowed values: none, regular_client, first_time_customer, loyalty_customer.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Friendly display label for a given Admin quote discount type.
+   * Used as the manualAdjustments[0].label audit entry and by toFrontendBooking.
+   *
+   * § HARD-FIXED: First-Time Customer always shows "— 15%".
+   */
+  getAdminQuoteDiscountLabel(discountType: AdminQuoteDiscountType): string {
+    switch (discountType) {
+      case 'none':
+        return 'None — 0%';
+      case 'regular_client':
+        return 'Regular Client Discount — 10%';
+      case 'first_time_customer':
+        return 'First-Time Customer Discount — 15%';
+      case 'loyalty_customer':
+        return 'Loyalty Customer Discount — 20%';
+      default: {
+        const never: never = discountType;
+        return `Unknown (${String(never)}) — 0%`;
+      }
+    }
+  }
+
   private roundCurrency(value: number): number {
     return Math.round(value * 100) / 100;
   }
@@ -2086,6 +4095,24 @@ export class BookingService {
     if (normalized === 'post-construction') return 'Post-Construction Cleaning';
     if (normalized === 'window-cleaning') return 'Window Cleaning';
     return this.toTitleCaseFromCode(normalized);
+  }
+
+  private getDisplaySpecialServiceLabel(idRaw: string): string {
+    const id =
+      typeof idRaw === 'string' ? idRaw.trim().toLowerCase() : '';
+    if (!id) return '';
+    try {
+      const entry =
+        (SPECIAL_SERVICES_V2 as Record<string, { label?: string } | undefined>)[
+          id
+        ];
+      if (entry && typeof entry.label === 'string' && entry.label.trim()) {
+        return entry.label.trim();
+      }
+    } catch {
+      /* ignore */
+    }
+    return this.toTitleCaseFromCode(id);
   }
 
   private normalizeExtraType(value: unknown): string {
@@ -2356,7 +4383,30 @@ export class BookingService {
     discountPercent: number;
     items: Array<{ label: string; amount: number }>;
   } {
-    const discountApplied = obj.applyFirstDiscount === true;
+    const legacyFlagApplied = obj.discountApplied === true;
+    const quoteDoc =
+      obj.quote && typeof obj.quote === 'object'
+        ? (obj.quote as Record<string, unknown>)
+        : null;
+    const quoteDiscountType =
+      quoteDoc && typeof quoteDoc.discountType === 'string' && quoteDoc.discountType.length > 0
+        ? quoteDoc.discountType
+        : null;
+    const quoteDiscountPercent =
+      quoteDoc && typeof quoteDoc.discountPercent === 'number' && Number.isFinite(quoteDoc.discountPercent)
+        ? quoteDoc.discountPercent
+        : null;
+    const quoteDiscountAmount =
+      quoteDoc && typeof quoteDoc.discountAmount === 'number' && Number.isFinite(quoteDoc.discountAmount)
+        ? quoteDoc.discountAmount
+        : null;
+    const isQuoteApplied =
+      !!quoteDiscountType &&
+      quoteDiscountType !== 'none' &&
+      quoteDiscountPercent != null &&
+      quoteDiscountAmount != null &&
+      quoteDiscountAmount > 0;
+    const discountApplied = legacyFlagApplied || isQuoteApplied;
     const dynRaw = obj.dynamicFields;
     const dyn =
       dynRaw && typeof dynRaw === 'object'
@@ -2393,6 +4443,23 @@ export class BookingService {
             : '',
       postConstruction: dyn.postConstruction,
       windowCleaning: dyn.windowCleaning,
+      pricingModelVersion:
+        typeof (obj as Record<string, unknown>).pricingModelVersion === 'string'
+          ? (obj as Record<string, unknown>).pricingModelVersion
+          : undefined,
+      specialServiceId:
+        typeof (obj as Record<string, unknown>).specialServiceId === 'string'
+          ? (obj as Record<string, unknown>).specialServiceId
+          : undefined,
+      regularCleaningPackageId:
+        typeof (obj as Record<string, unknown>).regularCleaningPackageId === 'string'
+          ? (obj as Record<string, unknown>).regularCleaningPackageId
+          : undefined,
+      borderlineFee:
+        typeof (obj as Record<string, unknown>).borderlineFee === 'number' &&
+        Number.isFinite((obj as Record<string, unknown>).borderlineFee as number)
+          ? ((obj as Record<string, unknown>).borderlineFee as number)
+          : undefined,
     } as unknown as CreateBookingDto;
 
     try {
@@ -2401,11 +4468,23 @@ export class BookingService {
         discountApplied,
         distanceFee,
       );
-      const estimatedBase = this.roundCurrency(
-        breakdown.baseServicePrice + breakdown.additionalBedroomsFee,
-      );
+      const basePackagePrice = this.roundCurrency(breakdown.baseServicePrice);
+      const specialServiceFeeFinite =
+        typeof (breakdown as any).specialServiceFee === 'number' &&
+        Number.isFinite((breakdown as any).specialServiceFee)
+          ? this.roundCurrency(Math.max(0, (breakdown as any).specialServiceFee))
+          : 0;
+      const borderlineFeeFinite =
+        typeof (breakdown as any).borderlineFee === 'number' &&
+        Number.isFinite((breakdown as any).borderlineFee)
+          ? this.roundCurrency(Math.max(0, (breakdown as any).borderlineFee))
+          : 0;
       const extras = this.roundCurrency(
-        breakdown.extrasTotal + breakdown.petsFee + breakdown.distanceFee,
+        breakdown.extrasTotal +
+          breakdown.petsFee +
+          breakdown.distanceFee +
+          specialServiceFeeFinite +
+          borderlineFeeFinite,
       );
       const discount = discountApplied
         ? -this.roundCurrency(breakdown.discountAmount)
@@ -2416,44 +4495,127 @@ export class BookingService {
         Number.isFinite(obj.finalPricePreview)
           ? obj.finalPricePreview
           : null;
-      const total = this.roundCurrency(storedTotal ?? breakdown.finalPrice);
+      const quoteFinalQuoted =
+        quoteDoc &&
+        typeof quoteDoc.finalQuotedPrice === 'number' &&
+        Number.isFinite(quoteDoc.finalQuotedPrice)
+          ? quoteDoc.finalQuotedPrice
+          : null;
+      const total = this.roundCurrency(quoteFinalQuoted ?? storedTotal ?? breakdown.finalPrice);
 
-      const items = [
-        { label: 'Base service', amount: estimatedBase },
-        ...(breakdown.additionalBedroomsFee > 0
-          ? [
-              {
-                label: 'Additional bedrooms',
-                amount: breakdown.additionalBedroomsFee,
-              },
-            ]
-          : []),
-        ...(breakdown.extrasTotal > 0
-          ? [{ label: 'Selected extras', amount: breakdown.extrasTotal }]
-          : []),
-        ...(breakdown.petsFee > 0
-          ? [{ label: 'Pets', amount: breakdown.petsFee }]
-          : []),
-        ...(breakdown.distanceFee > 0
-          ? [{ label: 'Distance surcharge', amount: breakdown.distanceFee }]
-          : []),
-        ...(discountApplied && breakdown.discountAmount > 0
-          ? [
-              {
-                label: `Discount (${breakdown.discountPercent}%)`,
-                amount: -breakdown.discountAmount,
-              },
-            ]
-          : []),
-      ];
+      const cleaningServiceLabel =
+        this.getDisplayServiceLabel(this.normalizeDisplayCode(obj.cleaningType)) || 'Service';
+      const bedroomsBathroomsCtx =
+        bedrooms && bathrooms
+          ? ` (${bedrooms} bed / ${bathrooms} bath${
+              additionalBedrooms && additionalBedrooms > 0
+                ? ` +${additionalBedrooms} add. bedroom${additionalBedrooms === 1 ? '' : 's'}`
+                : ''
+            })`
+          : '';
+      const baseCleaningAmount = this.roundCurrency(
+        basePackagePrice + (breakdown.additionalBedroomsFee > 0 ? breakdown.additionalBedroomsFee : 0),
+      );
+      const hasSpecialServiceFee =
+        typeof (breakdown as any).specialServiceFee === 'number' &&
+        Number.isFinite((breakdown as any).specialServiceFee) &&
+        (breakdown as any).specialServiceFee > 0;
+      const specialServiceLabel =
+        hasSpecialServiceFee && obj && typeof (obj as any).specialServiceId === 'string'
+          ? this.getDisplaySpecialServiceLabel((obj as any).specialServiceId) || 'Special service'
+          : 'Special service';
+
+      let extrasItemsDisplay: Array<{ label: string; amount: number }> = [];
+      if (breakdown.extrasTotal > 0) {
+        try {
+          const ssIdRaw =
+            obj && typeof (obj as Record<string, unknown>).specialServiceId === 'string'
+              ? String((obj as Record<string, unknown>).specialServiceId).trim()
+              : '';
+          const ssIdTyped =
+            (ssIdRaw &&
+              (SPECIAL_SERVICES_V2 as Record<string, unknown>)[ssIdRaw]) ||
+            null
+              ? (ssIdRaw as SpecialServiceIdV2)
+              : null;
+          const extrasBreakdown = this.calculateExtrasV2(
+            Array.isArray(obj.extras) ? obj.extras : [],
+            ssIdTyped,
+          );
+          const extrasRows = extrasBreakdown.items
+            .map((x) => {
+              const displayLabel = this.getDisplayExtraLabel(x.type as OptionalExtraIdV2) || x.type;
+              const qtySuffix =
+                typeof x.quantity === 'number' && x.quantity > 1 ? ` ×${x.quantity}` : '';
+              return {
+                label: `${displayLabel}${qtySuffix}`,
+                amount: this.roundCurrency(x.subtotal),
+              };
+            });
+          const extrasRowsSum = extrasRows.reduce(
+            (s, r) => this.roundCurrency(s + r.amount),
+            0,
+          );
+          if (Math.abs(extrasRowsSum - breakdown.extrasTotal) < 0.5) {
+            extrasItemsDisplay = extrasRows;
+          }
+        } catch {
+          extrasItemsDisplay = [];
+        }
+        if (extrasItemsDisplay.length === 0) {
+          extrasItemsDisplay = [{ label: 'Extras', amount: breakdown.extrasTotal }];
+        }
+      }
+
+      const items: Array<{ label: string; amount: number }> = [];
+      items.push({ label: 'Base Cleaning', amount: baseCleaningAmount });
+      if (hasSpecialServiceFee) {
+        items.push({
+          label: specialServiceLabel,
+          amount: (breakdown as any).specialServiceFee,
+        });
+      }
+      for (const row of extrasItemsDisplay) items.push(row);
+      if (breakdown.petsFee > 0) {
+        items.push({ label: 'Pets', amount: breakdown.petsFee });
+      }
+      if (breakdown.distanceFee > 0) {
+        items.push({ label: 'Distance surcharge', amount: breakdown.distanceFee });
+      }
+      if (
+        typeof (breakdown as any).borderlineFee === 'number' &&
+        Number.isFinite((breakdown as any).borderlineFee) &&
+        (breakdown as any).borderlineFee > 0
+      ) {
+        items.push({ label: 'Borderline fee', amount: (breakdown as any).borderlineFee });
+      }
+      if (discountApplied && (isQuoteApplied || breakdown.discountAmount > 0)) {
+        const displayPct =
+          isQuoteApplied && quoteDiscountPercent != null
+            ? quoteDiscountPercent
+            : breakdown.discountPercent;
+        const displayAmount =
+          isQuoteApplied && quoteDiscountAmount != null
+            ? quoteDiscountAmount
+            : breakdown.discountAmount;
+        if (displayAmount > 0) {
+          items.push({
+            label: `Discount (${displayPct}%)`,
+            amount: -displayAmount,
+          });
+        }
+      }
 
       return {
-        base: estimatedBase,
+        base: basePackagePrice,
         extras,
         discount,
         total,
         discountApplied,
-        discountPercent: breakdown.discountPercent,
+        discountPercent:
+          isQuoteApplied && quoteDiscountPercent != null
+            ? quoteDiscountPercent
+            : breakdown.discountPercent,
         items,
       };
     } catch {
@@ -2463,21 +4625,39 @@ export class BookingService {
           ? this.roundCurrency(obj.estimatedPrice)
           : 0;
       const total =
-        typeof obj.finalPricePreview === 'number' &&
-        Number.isFinite(obj.finalPricePreview)
-          ? this.roundCurrency(obj.finalPricePreview)
-          : estimatedPrice;
+        (quoteDoc &&
+          typeof quoteDoc.finalQuotedPrice === 'number' &&
+          Number.isFinite(quoteDoc.finalQuotedPrice))
+          ? this.roundCurrency(quoteDoc.finalQuotedPrice)
+          : typeof obj.finalPricePreview === 'number' &&
+              Number.isFinite(obj.finalPricePreview)
+            ? this.roundCurrency(obj.finalPricePreview)
+            : estimatedPrice;
       const extras = this.roundCurrency(Math.max(0, total - estimatedPrice));
+      const fallbackServiceLabel =
+        this.getDisplayServiceLabel(this.normalizeDisplayCode(obj.cleaningType)) || 'Service';
       return {
         base: estimatedPrice,
         extras,
-        discount: 0,
+        discount:
+          isQuoteApplied && quoteDiscountAmount != null
+            ? -this.roundCurrency(quoteDiscountAmount)
+            : 0,
         total,
         discountApplied,
-        discountPercent: this.getFirstTimeDiscountPercent(),
+        discountPercent:
+          isQuoteApplied && quoteDiscountPercent != null
+            ? quoteDiscountPercent
+            : this.getFirstTimeDiscountPercent(),
         items: [
-          { label: 'Base service', amount: estimatedPrice },
+          { label: `${fallbackServiceLabel} package`, amount: estimatedPrice },
           ...(extras > 0 ? [{ label: 'Extras & fees', amount: extras }] : []),
+          ...(isQuoteApplied && quoteDiscountPercent != null && quoteDiscountAmount != null && quoteDiscountAmount > 0
+            ? [{
+                label: `Discount (${quoteDiscountPercent}%)`,
+                amount: -this.roundCurrency(quoteDiscountAmount),
+              }]
+            : []),
         ],
       };
     }
@@ -2487,8 +4667,20 @@ export class BookingService {
     obj: Record<string, unknown>,
   ): Record<string, unknown> {
     const cleaningType = this.normalizeDisplayCode(obj.cleaningType);
-    const serviceLabel =
+    let serviceLabel =
       this.getDisplayServiceLabel(cleaningType) || cleaningType || 'Service';
+
+    const specialServiceIdRaw =
+      obj && typeof (obj as Record<string, unknown>).specialServiceId === 'string'
+        ? String((obj as Record<string, unknown>).specialServiceId).trim()
+        : '';
+    if (specialServiceIdRaw) {
+      const specialLabel = this.getDisplaySpecialServiceLabel(specialServiceIdRaw);
+      if (specialLabel) {
+        serviceLabel += ` + ${specialLabel}`;
+      }
+    }
+
     const frequencyCode = this.normalizeDisplayCode(obj.frequency);
     const frequencyLabel =
       this.getDisplayFrequencyLabel(frequencyCode) ||
@@ -2502,6 +4694,8 @@ export class BookingService {
     if (obj.petsAtHome === true) specialConditions.push('Pets at home');
     if (obj.useOwnProducts === true)
       specialConditions.push('Use customer-provided products');
+    if (obj.firstServiceDiscountRequested === true || obj.applyFirstDiscount === true)
+      specialConditions.push('First-Service Discount Requested');
 
     const notes = this.extractCustomerNotes(obj);
 
@@ -2527,6 +4721,25 @@ export class BookingService {
       extras,
       notes,
       specialConditions,
+      pets: {
+        atHome: obj.petsAtHome === true,
+        safetyNotes:
+          typeof obj.petSafetyNotes === 'string' && obj.petSafetyNotes.trim().length > 0
+            ? obj.petSafetyNotes.trim()
+            : null,
+      },
+      cleaningProducts: {
+        useOwn: obj.useOwnProducts === true || obj.usesOwnCleaningProducts === true,
+        productInstructions:
+          typeof obj.cleaningProductNotes === 'string' && obj.cleaningProductNotes.trim().length > 0
+            ? obj.cleaningProductNotes.trim()
+            : null,
+      },
+      firstServiceDiscount: {
+        requestedByCustomer:
+          obj.firstServiceDiscountRequested === true || obj.applyFirstDiscount === true,
+        appliedByAdmin: obj.discountApplied === true,
+      },
       pricing: {
         ...pricing,
         currency: 'USD',
@@ -2635,6 +4848,68 @@ export class BookingService {
       assignedEmployees: derivedAssignedEmployees,
       assignedSupervisor,
       display: this.buildDisplayModel(obj),
+      baseServicePrice:
+        typeof obj.baseServicePrice === 'number' ? obj.baseServicePrice : 0,
+      additionalBedroomsFee:
+        typeof obj.additionalBedroomsFee === 'number'
+          ? obj.additionalBedroomsFee
+          : 0,
+      specialServiceFee:
+        typeof obj.specialServiceFee === 'number' ? obj.specialServiceFee : 0,
+      extrasTotal:
+        typeof obj.extrasTotal === 'number' ? obj.extrasTotal : 0,
+      borderlineFee:
+        typeof obj.borderlineFee === 'number' ? obj.borderlineFee : 0,
+    };
+  }
+
+  /**
+   * Proyeccion segura para el nuevo endpoint de solicitud de cotizacion.
+   *
+   * OBJETIVO:
+   * - No exponer pricing final ni paymentUrl al cliente en esta fase.
+   * - Devolver solo la informacion necesaria para confirmar que la solicitud
+   *   fue registrada correctamente.
+   */
+  private toQuoteRequestBooking(
+    booking: BookingDocument,
+  ): Record<string, unknown> {
+    const obj =
+      typeof booking.toObject === 'function'
+        ? (booking.toObject() as Record<string, unknown>)
+        : (booking as unknown as Record<string, unknown>);
+
+    return {
+      _id: String(booking._id),
+      status: typeof obj.status === 'string' ? obj.status : '',
+      commercialStatus:
+        typeof obj.commercialStatus === 'string' ? obj.commercialStatus : '',
+      name: typeof obj.name === 'string' ? obj.name : '',
+      email: typeof obj.email === 'string' ? obj.email : '',
+      phone: typeof obj.phone === 'string' ? obj.phone : '',
+      address: typeof obj.address === 'string' ? obj.address : '',
+      cleaningType:
+        typeof obj.cleaningType === 'string' ? obj.cleaningType : '',
+      desiredDate: typeof obj.desiredDate === 'string' ? obj.desiredDate : '',
+      desiredTime: typeof obj.desiredTime === 'string' ? obj.desiredTime : '',
+      frequency: typeof obj.frequency === 'string' ? obj.frequency : '',
+      petsAtHome: obj.petsAtHome === true,
+      petSafetyNotes:
+        typeof obj.petSafetyNotes === 'string' && obj.petSafetyNotes.trim().length > 0
+          ? obj.petSafetyNotes.trim()
+          : null,
+      useOwnProducts: obj.useOwnProducts === true,
+      usesOwnCleaningProducts: obj.usesOwnCleaningProducts === true || obj.useOwnProducts === true,
+      cleaningProductNotes:
+        typeof obj.cleaningProductNotes === 'string' && obj.cleaningProductNotes.trim().length > 0
+          ? obj.cleaningProductNotes.trim()
+          : null,
+      applyFirstDiscount: obj.applyFirstDiscount === true,
+      firstServiceDiscountRequested:
+        obj.firstServiceDiscountRequested === true || obj.applyFirstDiscount === true,
+      extras: Array.isArray(obj.extras) ? obj.extras : [],
+      createdAt: obj.createdAt,
+      updatedAt: obj.updatedAt,
     };
   }
 
@@ -2672,5 +4947,333 @@ export class BookingService {
         }),
       );
     }
+  }
+
+  // ========================================================================
+  // CUSTOM QUOTE (FASE 4D) — Aislado del flujo normal de booking.
+  // NO persiste en MongoDB. Solo envía email con attachments.
+  // ========================================================================
+
+  private readonly CUSTOM_QUOTE_REQUEST_LABELS: Record<string, string> = {
+    commercial_cleaning: 'Commercial Cleaning',
+    deep_cleaning_large: 'Large / Deep Cleaning',
+    hoarding: 'Hoarding / Extreme Cleanup',
+    post_construction_large: 'Large Post-Construction',
+    other: 'Other / Special Request',
+  };
+
+  private escapeHtml(value: string | number | undefined | null): string {
+    const s = value == null ? '' : String(value);
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  async sendCustomQuoteEmail(
+    payload: {
+      name: string;
+      email: string;
+      address: string;
+      requestType: string;
+      description: string;
+    },
+    files: Array<{
+      originalname: string;
+      mimetype: string;
+      buffer: Buffer;
+      size: number;
+    }> = [],
+  ): Promise<{ success: true; messageId?: string; sentTo: string[] }> {
+    const requestTypeLabel =
+      this.CUSTOM_QUOTE_REQUEST_LABELS[payload.requestType] ??
+      this.toTitleCaseFromCode(payload.requestType);
+
+    const now = new Date();
+    const submittedAt = now.toISOString();
+
+    const rows: Array<[string, string]> = [
+      ['Name', payload.name],
+      ['Email', payload.email],
+      ['Address', payload.address],
+      ['Request Type', requestTypeLabel],
+    ];
+    rows.push(['Submitted At', submittedAt]);
+    if (files.length > 0) {
+      const totalBytes = files.reduce((sum, f) => sum + (f.size ?? 0), 0);
+      const totalKB = Math.round(totalBytes / 1024);
+      const filesList = files
+        .map(
+          (f) =>
+            `• ${this.escapeHtml(f.originalname)} (${f.mimetype}, ${Math.round((f.size ?? 0) / 1024)} KB)`,
+        )
+        .join('<br>');
+      rows.push([`Photos (${files.length}, ${totalKB} KB total)`, filesList]);
+    }
+
+    const tableHtml = rows
+      .map(
+        ([k, v]) =>
+          `<tr><td style="font-weight:600;padding:8px 12px;border-bottom:1px solid #eee;vertical-align:top;min-width:180px">${this.escapeHtml(k)}</td><td style="padding:8px 12px;border-bottom:1px solid #eee;white-space:pre-wrap">${this.escapeHtml(v)}</td></tr>`,
+      )
+      .join('');
+
+    const html = `
+      <div style="font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:0 auto;color:#222">
+        <div style="background:#2c7fb8;color:#fff;padding:18px 24px;border-radius:8px 8px 0 0">
+          <h1 style="margin:0;font-size:22px">ZCLEANUP — Custom Quote Request</h1>
+          <p style="margin:6px 0 0;opacity:0.9;font-size:14px">${this.escapeHtml(requestTypeLabel)} — ${this.escapeHtml(submittedAt)}</p>
+        </div>
+        <div style="border:1px solid #e5e5e5;border-top:0;border-radius:0 0 8px 8px;overflow:hidden">
+          <table style="width:100%;border-collapse:collapse">
+            ${tableHtml}
+          </table>
+          <div style="padding:18px 24px;border-top:1px solid #eee">
+            <h2 style="margin:0 0 10px;font-size:16px;color:#2c7fb8">Description</h2>
+            <p style="margin:0;white-space:pre-wrap;line-height:1.55">${this.escapeHtml(payload.description)}</p>
+          </div>
+          <div style="padding:16px 24px;background:#fafafa;color:#555;font-size:12px;border-top:1px solid #eee">
+            This email was sent from the ZCLEANUP Custom Quote public form. Reply directly to respond to the customer.
+          </div>
+        </div>
+      </div>
+    `;
+
+    const textLines = [
+      'ZCLEANUP — CUSTOM QUOTE REQUEST',
+      '=============================',
+      '',
+      `Submitted: ${submittedAt}`,
+      `Name: ${payload.name}`,
+      `Email: ${payload.email}`,
+      `Address: ${payload.address}`,
+      `Request Type: ${requestTypeLabel}`,
+      '',
+      'DESCRIPTION:',
+      payload.description,
+      '',
+      files.length > 0
+        ? `PHOTOS ATTACHED (${files.length}):\n` +
+          files
+            .map(
+              (f) =>
+                `  - ${f.originalname} (${Math.round((f.size ?? 0) / 1024)} KB, ${f.mimetype})`,
+            )
+            .join('\n')
+        : 'No photos attached.',
+    ].filter(Boolean);
+    const text = textLines.join('\n');
+
+    const attachments: EmailAttachment[] = files.map((f) => ({
+      filename: f.originalname || 'photo',
+      contentType: f.mimetype || 'application/octet-stream',
+      content: f.buffer,
+    }));
+
+    const subject = `[CUSTOM QUOTE] ${requestTypeLabel} — ${payload.name}`;
+
+    this.logger.log(
+      JSON.stringify({
+        event: 'custom_quote.send_start',
+        requestType: payload.requestType,
+        filesCount: files.length,
+      }),
+    );
+
+    const sendResult = await this.emailService.sendRawEmail({
+      subject,
+      html,
+      text,
+      attachments,
+      replyTo: payload.email,
+    });
+
+    const messageId =
+      typeof sendResult === 'object' &&
+      sendResult !== null &&
+      'messageId' in sendResult
+        ? (sendResult as { messageId?: unknown }).messageId
+        : undefined;
+
+    const sentTo: string[] = [];
+    if (process.env.EMAIL_USER) sentTo.push(process.env.EMAIL_USER);
+
+    let confirmationMessageId: unknown = undefined;
+    try {
+      const confirmHtml = `
+        <div style="font-family:Arial,Helvetica,sans-serif;max-width:600px;margin:0 auto;color:#222">
+          <div style="background:#2c7fb8;color:#fff;padding:16px 20px;border-radius:8px 8px 0 0">
+            <h2 style="margin:0;font-size:18px">Thank you for your Custom Quote request — ZCLEANUP</h2>
+          </div>
+          <div style="border:1px solid #e5e5e5;border-top:0;border-radius:0 0 8px 8px;padding:20px;line-height:1.55">
+            <p style="margin:0 0 12px">Hi <strong>${this.escapeHtml(payload.name)}</strong>,</p>
+            <p style="margin:0 0 12px">We received your request for <strong>${this.escapeHtml(requestTypeLabel)}</strong>.</p>
+            <p style="margin:0 0 12px">A member of our team will review the details${files.length > 0 ? ' and the attached photos' : ''} and get back to you within 1–2 business days.</p>
+            <p style="margin:0">If you have any additional questions, reply to this email.</p>
+            <div style="margin-top:24px;padding-top:14px;border-top:1px solid #eee;color:#555;font-size:12px">
+              — The ZCLEANUP Team
+            </div>
+          </div>
+        </div>
+      `;
+      const confirmText = [
+        `Hi ${payload.name},`,
+        '',
+        `Thank you for your Custom Quote request for: ${requestTypeLabel}.`,
+        files.length > 0
+          ? `We received ${files.length} attached photo(s).`
+          : 'No photos were attached.',
+        '',
+        'Our team will review the details and get back to you within 1–2 business days.',
+        '',
+        '— The ZCLEANUP Team',
+      ].join('\n');
+
+      confirmationMessageId = await this.emailService.sendRawEmail({
+        to: payload.email,
+        subject: `[ZCLEANUP] Custom Quote received — ${requestTypeLabel}`,
+        html: confirmHtml,
+        text: confirmText,
+      });
+      sentTo.push(payload.email);
+    } catch (confirmErr) {
+      this.logger.error(
+        JSON.stringify({
+          event: 'custom_quote.confirm_email_failed',
+          error:
+            confirmErr instanceof Error
+              ? confirmErr.message
+              : String(confirmErr),
+        }),
+      );
+    }
+
+    this.logger.log(
+      JSON.stringify({
+        event: 'custom_quote.send_ok',
+        requestType: payload.requestType,
+        messageId,
+        confirmationMessageId:
+          typeof confirmationMessageId === 'object' &&
+          confirmationMessageId !== null &&
+          'messageId' in confirmationMessageId
+            ? (confirmationMessageId as { messageId?: unknown }).messageId
+            : undefined,
+        sentTo,
+      }),
+    );
+
+    return {
+      success: true as const,
+      messageId: typeof messageId === 'string' ? messageId : undefined,
+      sentTo,
+    };
+  }
+
+  // ========================================================================
+  // ADMIN-ONLY: First-Service 15% Discount Application
+  // DELEGATES TO THE SINGLE AUTHORITATIVE ADMIN MECHANISM (saveQuoteDraft)
+  // ========================================================================
+
+  public async applyAdminFirstServiceDiscount(
+    bookingId: string,
+    adminUser: AuthUser,
+  ): Promise<{ booking: Record<string, unknown>; discount: { percent: number; amount: number } }> {
+    if (!bookingId || !isValidObjectId(bookingId)) {
+      throw new NotFoundException(`Booking with id "${bookingId}" not found`);
+    }
+
+    const booking = await this.bookingModel.findById(bookingId).exec();
+    if (!booking) {
+      throw new NotFoundException(`Booking with id "${bookingId}" not found`);
+    }
+
+    if (booking.discountApplied === true) {
+      throw new ConflictException('First-service discount has already been applied for this booking');
+    }
+
+    const wantsDiscountRequested =
+      booking.firstServiceDiscountRequested === true ||
+      booking.applyFirstDiscount === true;
+
+    if (!wantsDiscountRequested) {
+      throw new BadRequestException(
+        'The customer did not request the first-service discount for this booking. Discount can only be applied when explicitly requested by the customer.',
+      );
+    }
+
+    const rawAddress = typeof booking.address === 'string' ? booking.address.trim() : '';
+    if (!rawAddress) {
+      throw new BadRequestException('Booking does not have a valid address for discount eligibility verification');
+    }
+
+    const normalizedAddress = normalizeAddress(rawAddress);
+    if (!normalizedAddress) {
+      throw new BadRequestException('Unable to normalize the booking address for discount eligibility verification');
+    }
+
+    const addressAlreadyUsed = await this.discountsService.hasUsedDiscountByNormalizedAddress(
+      normalizedAddress,
+    );
+    if (addressAlreadyUsed) {
+      throw new ConflictException(
+        'The first-service discount has already been used for this address. Each address is eligible for the first-service discount exactly once.',
+      );
+    }
+
+    const currentCommercial = this.getCommercialStatus(booking);
+    const commercialOk =
+      currentCommercial === undefined ||
+      currentCommercial === null ||
+      currentCommercial === 'quote_requested' ||
+      currentCommercial === 'under_review' ||
+      currentCommercial === 'quoted_draft';
+
+    if (!commercialOk) {
+      try {
+        await this.reviseQuote(bookingId, adminUser);
+      } catch (_reviseErr) {
+        throw new ConflictException(
+          `Cannot apply first-service discount: the current quote/commercial status (${String(currentCommercial)}) cannot be prepared for editing automatically.`,
+        );
+      }
+    }
+
+    const updated = await this.saveQuoteDraft(
+      bookingId,
+      { discountType: 'first_time_customer' },
+      adminUser,
+    );
+
+    const percent = 15;
+    const amount =
+      typeof (updated.quote as { discountAmount?: unknown } | null | undefined)?.discountAmount ===
+        'number'
+        ? this.roundCurrency((updated.quote as { discountAmount: number }).discountAmount)
+        : this.roundCurrency(
+            (this.recomputeUndiscountedAuthoritativeBase(updated) * percent) / 100,
+          );
+
+    this.logger.log(
+      JSON.stringify({
+        event: 'admin_discount.first_service_applied_via_delegate',
+        bookingId: String(updated._id),
+        appliedBy: this.resolveActorIdentifier(adminUser) || 'admin',
+        appliedAt: (updated.quote as { reviewedAt?: Date | undefined } | null | undefined)
+          ?.reviewedAt?.toISOString?.() || new Date().toISOString(),
+        discountPercent: percent,
+        discountAmount: amount,
+      }),
+    );
+
+    return {
+      booking: this.formatBookingForDisplay(updated),
+      discount: {
+        percent,
+        amount,
+      },
+    };
   }
 }

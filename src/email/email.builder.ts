@@ -4,11 +4,39 @@ import * as fs from 'fs';
 import { buildBookingCancelledTemplate } from './templates/booking-cancelled.template';
 import { buildBookingConfirmedTemplate } from './templates/booking-confirmed.template';
 import { buildBookingCreatedTemplate } from './templates/booking-created.template';
+import { buildBookingQuoteFlowTemplate } from './templates/booking-quote-flow.template';
 
 export type BookingEventType =
   | 'booking.created'
   | 'booking.confirmed'
-  | 'booking.cancelled';
+  | 'booking.cancelled'
+  | 'booking.quote_requested'
+  | 'booking.quote_sent'
+  | 'booking.quote_accepted'
+  | 'booking.quote_rejected'
+  | 'booking.invoice_ready'
+  | 'booking.payment_received';
+
+export type BookingQuotePayload = {
+  version?: number;
+  status?: string;
+  baseCalculatedPrice?: number;
+  finalQuotedPrice?: number;
+  manualAdjustments?: Array<{
+    type?: string;
+    label?: string;
+    amount?: number;
+    reason?: string;
+  }>;
+  reviewedBy?: string;
+  reviewedAt?: string | Date;
+  sentAt?: string | Date;
+  acceptedAt?: string | Date;
+  rejectedAt?: string | Date;
+  expiresAt?: string | Date;
+  customerMessage?: string;
+  internalNotes?: string;
+};
 
 export type BookingEmailPayload = {
   bookingId?: string;
@@ -21,8 +49,12 @@ export type BookingEmailPayload = {
   desiredTime?: string;
   frequency?: string;
   petsAtHome?: boolean;
+  petSafetyNotes?: string | null;
   useOwnProducts?: boolean;
+  usesOwnCleaningProducts?: boolean;
+  cleaningProductNotes?: string | null;
   applyFirstDiscount?: boolean;
+  firstServiceDiscountRequested?: boolean;
   extras?: unknown[];
   estimatedPrice?: number;
   finalPricePreview?: number;
@@ -30,6 +62,9 @@ export type BookingEmailPayload = {
   trackingUrl?: string;
   dynamicFields?: Record<string, unknown>;
   status?: string;
+  commercialStatus?: string;
+  paymentLifecycleStatus?: string;
+  quote?: BookingQuotePayload;
   display?: unknown;
 };
 
@@ -113,11 +148,17 @@ export class EmailBuilder {
 
     switch (params.eventType) {
       case 'booking.created':
+      case 'booking.quote_requested':
+      case 'booking.quote_accepted':
         // 📩 empresa recibe nuevo booking
         return process.env.EMAIL_USER!;
 
       case 'booking.confirmed':
       case 'booking.cancelled':
+      case 'booking.quote_sent':
+      case 'booking.quote_rejected':
+      case 'booking.invoice_ready':
+      case 'booking.payment_received':
         // 📩 cliente recibe updates
         return customerEmail;
 
@@ -135,6 +176,13 @@ export class EmailBuilder {
         return buildBookingConfirmedTemplate(viewModel);
       case 'booking.cancelled':
         return buildBookingCancelledTemplate(viewModel);
+      case 'booking.quote_requested':
+      case 'booking.quote_sent':
+      case 'booking.quote_accepted':
+      case 'booking.quote_rejected':
+      case 'booking.invoice_ready':
+      case 'booking.payment_received':
+        return buildBookingQuoteFlowTemplate(viewModel);
       case 'booking.created':
       default:
         return buildBookingCreatedTemplate(viewModel);
@@ -150,6 +198,24 @@ export class EmailBuilder {
     }
     if (eventType === 'booking.cancelled') {
       return `Booking cancelled - ${cleaningType}`;
+    }
+    if (eventType === 'booking.quote_requested') {
+      return `New quote request received - ${cleaningType}`;
+    }
+    if (eventType === 'booking.quote_sent') {
+      return `Your quote is ready - ${cleaningType}`;
+    }
+    if (eventType === 'booking.quote_accepted') {
+      return `Quote accepted - ${cleaningType}`;
+    }
+    if (eventType === 'booking.quote_rejected') {
+      return `Quote update - ${cleaningType}`;
+    }
+    if (eventType === 'booking.invoice_ready') {
+      return `Invoice ready - ${cleaningType}`;
+    }
+    if (eventType === 'booking.payment_received') {
+      return `Payment received - ${cleaningType}`;
     }
     return `New booking received - ${cleaningType}`;
   }
@@ -249,6 +315,90 @@ export class EmailBuilder {
         statusBackground: '#fee2e2',
         ctaLabel: 'View Booking',
         ctaUrl: '#',
+        ...base,
+      };
+    }
+
+    if (eventType === 'booking.quote_requested') {
+      return {
+        heading: 'New Quote Request Received',
+        preheader:
+          'A customer submitted a new quote request for manual review.',
+        statusLabel: 'QUOTE REQUESTED',
+        statusColor: '#92400e',
+        statusBackground: '#fef3c7',
+        ctaLabel: 'Review Request',
+        ctaUrl: trackingUrl,
+        ...base,
+      };
+    }
+
+    if (eventType === 'booking.quote_sent') {
+      return {
+        heading: 'Your Quote Is Ready',
+        preheader:
+          'We prepared your quote. Please review the pricing and next steps.',
+        statusLabel: 'QUOTE SENT',
+        statusColor: '#1d4ed8',
+        statusBackground: '#dbeafe',
+        ctaLabel: trackingUrl ? 'Review Quote' : '',
+        ctaUrl: trackingUrl,
+        ...base,
+      };
+    }
+
+    if (eventType === 'booking.quote_accepted') {
+      return {
+        heading: 'Quote Accepted',
+        preheader:
+          'The quote was accepted and the booking can move to the invoicing stage.',
+        statusLabel: 'QUOTE ACCEPTED',
+        statusColor: '#166534',
+        statusBackground: '#dcfce7',
+        ctaLabel: trackingUrl ? 'View Booking' : '',
+        ctaUrl: trackingUrl,
+        ...base,
+      };
+    }
+
+    if (eventType === 'booking.quote_rejected') {
+      return {
+        heading: 'Quote Update',
+        preheader:
+          'Your quote request has been closed or rejected. Contact us if you need a revised proposal.',
+        statusLabel: 'QUOTE REJECTED',
+        statusColor: '#991b1b',
+        statusBackground: '#fee2e2',
+        ctaLabel: trackingUrl ? 'View Details' : '',
+        ctaUrl: trackingUrl,
+        ...base,
+      };
+    }
+
+    if (eventType === 'booking.invoice_ready') {
+      return {
+        heading: 'Your Invoice Is Ready',
+        preheader:
+          'Your quote has been approved and your invoice is ready for payment.',
+        statusLabel: 'INVOICE READY',
+        statusColor: '#7c3aed',
+        statusBackground: '#ede9fe',
+        ctaLabel: paymentUrl ? 'Complete Payment' : '',
+        ctaUrl: paymentUrl,
+        ...base,
+      };
+    }
+
+    if (eventType === 'booking.payment_received') {
+      return {
+        heading: 'Payment Received',
+        preheader:
+          'We received your payment successfully. Your booking is now ready for the next operational steps.',
+        statusLabel: 'PAID',
+        statusColor: '#166534',
+        statusBackground: '#dcfce7',
+        ctaLabel: trackingUrl ? 'Track Booking' : '',
+        ctaUrl: trackingUrl,
         ...base,
       };
     }
@@ -368,26 +518,81 @@ export class EmailBuilder {
     booking: BookingEmailPayload,
     display: Record<string, unknown> | null,
   ): string[] {
-    const conditions =
+    const conditionsRaw =
       display &&
       'specialConditions' in display &&
       Array.isArray(display.specialConditions)
-        ? (display.specialConditions as unknown[])
+        ? [...(display.specialConditions as unknown[])]
         : null;
-
-    if (conditions) {
-      return conditions
-        .map((x) => (typeof x === 'string' ? x : ''))
-        .map((x) => x.trim())
-        .filter(Boolean)
-        .map((x) => this.escapeHtml(x));
-    }
 
     const list: string[] = [];
     if (booking.petsAtHome === true) list.push('Pets at home');
-    if (booking.useOwnProducts === true)
+    if (booking.useOwnProducts === true || (booking as any).usesOwnCleaningProducts === true)
       list.push('Use customer-provided products');
-    return list.map((x) => this.escapeHtml(x));
+
+    const quote = this.isRecord(booking.quote) ? booking.quote : null;
+    const quoteType =
+      quote && typeof (quote as any).discountType === 'string'
+        ? String((quote as any).discountType).trim()
+        : '';
+    const appliedViaLegacy = (booking as any).discountApplied === true;
+    const appliedViaQuote =
+      quoteType === 'first_time_customer' ||
+      quoteType === 'regular_client' ||
+      quoteType === 'loyalty_customer';
+
+    if (appliedViaLegacy || appliedViaQuote) {
+      const alreadyInDisplay =
+        Array.isArray(conditionsRaw) &&
+        conditionsRaw.some(
+          (it) => typeof it === 'string' && it.trim() === 'First-Service Discount Applied',
+        );
+      if (!alreadyInDisplay) list.push('First-Service Discount Applied');
+    } else if (
+      (booking as any).firstServiceDiscountRequested === true ||
+      booking.applyFirstDiscount === true
+    ) {
+      const alreadyInDisplay =
+        Array.isArray(conditionsRaw) &&
+        conditionsRaw.some(
+          (it) =>
+            typeof it === 'string' &&
+            (it.trim() === 'First-Service Discount Requested' ||
+              it.trim() === 'First-Service Discount Applied'),
+        );
+      if (!alreadyInDisplay) list.push('First-Service Discount Requested');
+    }
+
+    const conditions = conditionsRaw ?? [];
+    // De-dup identical string conditions between the display-supplied list and the list we built (and preserve
+    // display's existing order first — our new items are appended after, with duplicate strings skipped).
+    const dedupedStrings: string[] = [];
+    const seen: Set<string> = new Set();
+    for (const raw of conditions) {
+      const str = typeof raw === 'string' ? raw.trim() : '';
+      if (!str) continue;
+      const esc = this.escapeHtml(str);
+      if (seen.has(esc)) continue;
+      seen.add(esc);
+      dedupedStrings.push(esc);
+    }
+    for (const it of list) {
+      const esc = typeof it === 'string' ? this.escapeHtml(it.trim()) : '';
+      if (!esc || seen.has(esc)) continue;
+      // If display already contains the sibling (Requested vs Applied) strip it to avoid showing
+      // an outdated "Requested" when the approved state now is "Applied".
+      if (esc === this.escapeHtml('First-Service Discount Applied')) {
+        const req = this.escapeHtml('First-Service Discount Requested');
+        if (seen.has(req)) {
+          const idx = dedupedStrings.indexOf(req);
+          if (idx >= 0) dedupedStrings.splice(idx, 1);
+          seen.delete(req);
+        }
+      }
+      seen.add(esc);
+      dedupedStrings.push(esc);
+    }
+    return dedupedStrings;
   }
 
   private buildCustomerNotes(
@@ -448,32 +653,102 @@ export class EmailBuilder {
     };
 
     const rows: Array<{ label: string; value: string; isTotal?: boolean }> = [];
+    const seenComponents: Array<{ label: string; amount: number }> = [];
+    let componentsSum = 0;
 
     if (items) {
       for (const item of items) {
         const safe = this.isRecord(item) ? item : null;
         const label = safe && typeof safe.label === 'string' ? safe.label : '';
-        const amount = safe ? safe.amount : undefined;
-        if (!label) continue;
-        rows.push({
-          label: this.escapeHtml(label),
-          value: formatMoney(amount),
-        });
+        const amountRaw = safe ? safe.amount : undefined;
+        const amountNum =
+          typeof amountRaw === 'number'
+            ? amountRaw
+            : typeof amountRaw === 'string'
+              ? Number(amountRaw)
+              : NaN;
+        if (!label || !Number.isFinite(amountNum)) continue;
+        // Never render a legacy "X package" row that includes additional bedrooms;
+        // we rely on separate rows from buildDisplayPricing.
+        const lowered = label.toLowerCase();
+        if (
+          lowered.includes('package') &&
+          lowered.includes('add. bedroom')
+        ) {
+          continue;
+        }
+        if (amountNum === 0) continue;
+        seenComponents.push({ label, amount: amountNum });
+        componentsSum = this.roundMoney(componentsSum + amountNum);
       }
     }
 
-    const total =
-      pricing && typeof pricing.total === 'number'
-        ? pricing.total
-        : booking.finalPricePreview;
+    for (const row of seenComponents) {
+      rows.push({
+        label: this.escapeHtml(row.label),
+        value: formatMoney(row.amount),
+      });
+    }
+
+    const quote = this.isRecord(booking.quote) ? booking.quote : null;
+    const quoteDiscountType =
+      quote && typeof (quote as any).discountType === 'string'
+        ? String((quote as any).discountType).trim()
+        : '';
+    const quoteDiscountAmountNum =
+      quote && typeof (quote as any).discountAmount !== 'undefined' && (quote as any).discountAmount !== null
+        ? Number((quote as any).discountAmount)
+        : NaN;
+    const isQuoteApprovedDiscount =
+      quoteDiscountType.length > 0 &&
+      quoteDiscountType !== 'none' &&
+      Number.isFinite(quoteDiscountAmountNum) &&
+      quoteDiscountAmountNum > 0;
+
+    let finalQuotedTotal: number | null = null;
+    if (quote && typeof quote.finalQuotedPrice !== 'undefined' && quote.finalQuotedPrice !== null) {
+      const fq = Number(quote.finalQuotedPrice);
+      if (Number.isFinite(fq)) finalQuotedTotal = fq;
+    }
+
+    // NOTE: do NOT independently push a second "Discount (XX%)" row from quote metadata.
+    // buildDisplayPricing() is the single source of truth for pricing rows including the
+    // applied-discount row. If it emitted a Discount row, we trust it. If not, we still
+    // avoid duplicating here � the TOTAL resolution below prefers quote.finalQuotedPrice,
+    // so the final total will still be correct for legacy/corner cases.
+
+    // --------- TOTAL resolution (authoritative, no duplicate calc) ---------
+    let total: number | null = null;
+    if (isQuoteApprovedDiscount && finalQuotedTotal != null) {
+      total = finalQuotedTotal;
+    } else if (pricing && typeof pricing.total === 'number' && Number.isFinite(pricing.total)) {
+      total = pricing.total;
+    } else if (quote && typeof quote.finalQuotedPrice === 'number' && Number.isFinite(quote.finalQuotedPrice)) {
+      // Legacy fallback, but NEVER trust a legacy final $20 if NEW components sum exists and is > 0.
+      if (seenComponents.length === 0 || Math.abs(quote.finalQuotedPrice - componentsSum) < 0.5) {
+        total = quote.finalQuotedPrice;
+      }
+    } else if (typeof booking.finalPricePreview === 'number' && Number.isFinite(booking.finalPricePreview)) {
+      total = booking.finalPricePreview;
+    }
+    if (total == null || !Number.isFinite(total)) {
+      total = seenComponents.length ? componentsSum : null;
+    }
+    if (total == null && typeof booking.estimatedPrice === 'number' && Number.isFinite(booking.estimatedPrice)) {
+      total = booking.estimatedPrice;
+    }
 
     rows.push({
-      label: this.escapeHtml('Total'),
+      label: this.escapeHtml('Estimated Total'),
       value: formatMoney(total),
       isTotal: true,
     });
 
     return rows;
+  }
+
+  private roundMoney(value: number): number {
+    return Math.round((value + Number.EPSILON) * 100) / 100;
   }
 
   private formatMoney(amount: number, currency: string): string {

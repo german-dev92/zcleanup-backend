@@ -171,4 +171,117 @@ describe('createRedisRateLimitMiddleware', () => {
     expect(next).toHaveBeenCalledTimes(1);
     expect(client.eval).not.toHaveBeenCalled();
   });
+
+  it('enforces auth/login throttling to reduce brute-force risk', async () => {
+    /**
+     * @description Este test protege contra regresiones en rate limiting.
+     *
+     * En producción:
+     * - /auth/login es un endpoint de alto riesgo (fuerza bruta de passwords).
+     * - El middleware debe devolver 429 cuando se excede el límite.
+     *
+     * Nota:
+     * - Aquí NO usamos Redis real. Simulamos `eval` con un Map en memoria.
+     * - Validamos nuestro comportamiento (headers + 429) que es lo importante.
+     */
+    const state = new Map<string, { count: number; expiresAt: number }>();
+
+    type EvalOptions = { keys: string[]; arguments: string[] };
+    type EvalReturn = [number, number];
+    type MockRedisClient = {
+      eval: (script: string, opts: EvalOptions) => Promise<EvalReturn>;
+    };
+
+    const evalImpl: MockRedisClient['eval'] = (_script, opts) => {
+      const key = String(opts.keys[0] ?? '');
+      const windowMs = Number(opts.arguments[0] ?? 0);
+      const now = Date.now();
+
+      const current = state.get(key);
+      if (!current || current.expiresAt <= now) {
+        const expiresAt = now + windowMs;
+        state.set(key, { count: 1, expiresAt });
+        return Promise.resolve([1, expiresAt - now]);
+      }
+
+      current.count += 1;
+      state.set(key, current);
+      return Promise.resolve([
+        current.count,
+        Math.max(0, current.expiresAt - now),
+      ]);
+    };
+
+    const client: MockRedisClient = {
+      eval: jest.fn(evalImpl),
+    };
+
+    const middleware = createRedisRateLimitMiddleware({
+      client,
+      rules: [
+        {
+          method: 'POST',
+          path: '/auth/login',
+          windowMs: 60_000,
+          max: 2,
+          keyPrefix: 'rl:auth_login',
+          message: 'Too many login attempts. Please try again later.',
+        },
+      ],
+    });
+
+    const next = jest.fn<void, []>();
+
+    const mkReq = () =>
+      ({
+        method: 'POST',
+        path: '/auth/login',
+        ip: '203.0.113.10',
+        socket: { remoteAddress: '203.0.113.10' },
+        requestId: 'req-auth-1',
+      }) as any;
+
+    const mkRes = () => {
+      const res: any = {
+        headers: {},
+        statusCode: 200,
+        body: undefined,
+        setHeader: (k: string, v: string) => {
+          res.headers[k] = v;
+        },
+        status: (code: number) => {
+          res.statusCode = code;
+          return res;
+        },
+        json: (payload: unknown) => {
+          res.body = payload;
+          return res;
+        },
+      };
+      return res;
+    };
+
+    const res1 = mkRes();
+    await middleware(mkReq(), res1, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res1.statusCode).toBe(200);
+    expect(res1.headers['X-RateLimit-Limit']).toBe('2');
+
+    const res2 = mkRes();
+    await middleware(mkReq(), res2, next);
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(res2.statusCode).toBe(200);
+    expect(res2.headers['X-RateLimit-Remaining']).toBe('0');
+
+    const res3 = mkRes();
+    await middleware(mkReq(), res3, next);
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(res3.statusCode).toBe(429);
+    expect(res3.body).toEqual(
+      expect.objectContaining({
+        statusCode: 429,
+        error: 'Too Many Requests',
+      }),
+    );
+  });
 });

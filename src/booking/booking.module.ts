@@ -8,11 +8,12 @@ import { Booking, BookingSchema } from './schemas/booking.schema';
 import { GeoPricingService } from './geo-pricing.service';
 
 import { EmailModule } from '../email/email.module';
-import { DiscountsModule } from '../discounts/discounts.module'; // 👈 IMPORT
+import { DiscountsModule } from '../discounts/discounts.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { Payment, PaymentSchema } from '../payments/schemas/payment.schema';
 import { EmployeesModule } from '../employees/employees.module';
 import { User, UserSchema } from '../users/schemas/user.schema';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
@@ -22,10 +23,11 @@ import { User, UserSchema } from '../users/schemas/user.schema';
       { name: User.name, schema: UserSchema },
     ]),
 
-    EmailModule, // 👈 ya lo tienes
-    DiscountsModule, // 👈 ESTE ES EL QUE TE FALTA O ESTÁ MAL
+    EmailModule,
+    DiscountsModule,
     PaymentsModule,
     EmployeesModule,
+    AuthModule,
   ],
   controllers: [BookingController],
   providers: [BookingService, BookingStateService, GeoPricingService],

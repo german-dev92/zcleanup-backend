@@ -236,21 +236,6 @@ export function buildBookingCreatedTemplate(
                           <tr>
                             <td style="padding: 18px 0 8px;">
                               <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
-                                Selected Extras
-                              </div>
-                              ${extrasHtml}
-                            </td>
-                          </tr>
-                        </table>
-                      </td>
-                    </tr>
-
-                    <tr>
-                      <td style="padding: 0 24px;">
-                        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
-                          <tr>
-                            <td style="padding: 18px 0 8px;">
-                              <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; color: #111827;">
                                 Customer Notes
                               </div>
                               ${customerNotesHtml}

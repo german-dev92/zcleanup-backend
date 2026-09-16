@@ -4,7 +4,7 @@ import mongoose from 'mongoose';
 /**
  * @file test/helpers/db-handler.ts
  * @description Helper para gestionar la base de datos en memoria (MongoMemoryServer).
- * 
+ *
  * ¿Por qué esto es profesional?
  * 1. Aislamiento: Cada suite de tests tiene su propia base de datos limpia.
  * 2. Velocidad: No hay latencia de red, todo ocurre en RAM.

@@ -7,18 +7,20 @@ import {
 import { createClient } from 'redis';
 import { normalizeAddress } from '../common/utils/normalize-address';
 
-type CoverageZone = {
+export type CoverageZone = {
   name: string;
   lat: number;
   lng: number;
   radiusKm: number;
 };
 
-type ZoneDistance = {
+export type ZoneDistance = {
   zone: CoverageZone;
   distanceKm: number;
   remainingKm: number;
 };
+
+export type GeoCoverageClassificationV2 = 'INSIDE' | 'BORDERLINE' | 'OUTSIDE';
 
 export type GeoPricingResult = {
   status: 'inside' | 'borderline' | 'outside';
@@ -28,6 +30,11 @@ export type GeoPricingResult = {
   distanceKm: number | null;
   lat: number | null;
   lng: number | null;
+  coverageClassification: GeoCoverageClassificationV2;
+  closestZoneName: string | null;
+  closestZoneDistanceKm: number | null;
+  v2BorderlineFeeApplicable: boolean;
+  borderlineOutsideThresholdKmV2: number;
 };
 
 type GeocodeOk = { ok: true; lat: number; lng: number };
@@ -37,6 +44,11 @@ type GeocodeFailReason =
   | 'request_denied'
   | 'api_unavailable';
 type GeocodeFail = { ok: false; reason: GeocodeFailReason; message: string };
+type GeocodeProviderCooldownState = {
+  until: number;
+  reason: GeocodeFailReason;
+  message: string;
+};
 
 type GeoTraceContext = {
   inputAddress: string;
@@ -82,10 +94,22 @@ export class GeoPricingService {
   ];
 
   private readonly borderlineThresholdKm = 3;
+  // V2: distancia MÁXIMA FUERA del boundary del círculo para seguir en BORDERLINE.
+  // INSIDE: distance <= radius
+  // BORDERLINE: radius < distance <= radius + BORDERLINE_OUTSIDE_THRESHOLD_V2_KM
+  // OUTSIDE: distance > radius + BORDERLINE_OUTSIDE_THRESHOLD_V2_KM
+  private readonly BORDERLINE_OUTSIDE_THRESHOLD_V2_KM = 1;
+  readonly BORDERLINE_FEE_V2_AMOUNT = 25;
   private readonly filterEpsilonKm = Number(
     process.env.GEO_PRICING_FILTER_EPSILON_KM ?? 0.05,
   );
   private traceOnceRemaining = process.env.GEO_PRICING_TRACE_ONCE === '1';
+  private readonly minimumAddressLength = Number(
+    process.env.GEO_PRICING_MIN_ADDRESS_LENGTH ?? 10,
+  );
+  private readonly providerFailureCooldownMs = Number(
+    process.env.GEO_PRICING_PROVIDER_FAILURE_COOLDOWN_MS ?? 5 * 60 * 1000,
+  );
 
   private readonly geocodeCacheTtlMs = Number(
     process.env.GEO_PRICING_GEOCODE_CACHE_TTL_MS ?? 24 * 60 * 60 * 1000,
@@ -116,6 +140,7 @@ export class GeoPricingService {
   private redisConnectPromise: Promise<ReturnType<
     typeof createClient
   > | null> | null = null;
+  private providerCooldown: GeocodeProviderCooldownState | null = null;
 
   async computeFromInput(input: {
     address?: unknown;
@@ -209,6 +234,23 @@ export class GeoPricingService {
       throw new BadRequestException('Address is required');
     }
 
+    if (address.length < this.getMinimumAddressLength()) {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'geo.input_validation',
+          addressPresent: true,
+          addressLength: address.length,
+          hasClientCoords,
+          accepted: false,
+          reason: 'address_too_short',
+          minAddressLength: this.getMinimumAddressLength(),
+        }),
+      );
+      throw new BadRequestException(
+        `Address must be at least ${this.getMinimumAddressLength()} characters`,
+      );
+    }
+
     const hasServerKey = this.hasServerGeocodingKey();
     if (hasServerKey) {
       this.logger.log(
@@ -241,7 +283,9 @@ export class GeoPricingService {
         if (geocoded.reason === 'invalid_address') {
           throw new BadRequestException(geocoded.message);
         }
-        throw new ServiceUnavailableException(geocoded.message);
+        throw new ServiceUnavailableException(
+          this.getClientFacingGeocodeErrorMessage(geocoded),
+        );
       }
 
       this.logger.log(
@@ -328,16 +372,6 @@ export class GeoPricingService {
     throw new ServiceUnavailableException(
       'Service temporarily unavailable. Please try again later.',
     );
-
-    return {
-      status: 'outside',
-      assignedZone: null,
-      isBorderline: false,
-      distanceSurcharge: false,
-      distanceKm: null,
-      lat: null,
-      lng: null,
-    };
   }
 
   computeSurcharge(lat: number, lng: number): GeoPricingResult {
@@ -353,6 +387,38 @@ export class GeoPricingService {
     const isProd = process.env.NODE_ENV === 'production';
     const includePii = trace && !isProd;
     const distances = this.computeDistances(lat, lng);
+
+    // ============================================================
+    // V2 — PRIMERO y sobre LAS 10 ZONAS COMPLETAS.
+    // ⚠️ NUNCA llames a filterZones / classifyZones / selectBestZone
+    //    (V1 legacy) ANTES de esta línea. distances[] contiene las
+    //    10 zonas intactas para la regla INSIDE > BORDERLINE > OUTSIDE.
+    // ============================================================
+    const v2Coverage = this.classifyCoverageV2(distances);
+    // ============================================================
+    // VARIABLES V2 SOURCE-OF-TRUTH.
+    // Derivadas 100% de classifyCoverageV2 (10 zonas).
+    // CONSTRUIR el return GeoPricingResult ÚNICAMENTE con estas;
+    // NUNCA con selected.isBorderlineV1 / classified / covering.length.
+    // ============================================================
+    const v2StatusToLegacy: Record<
+      GeoCoverageClassificationV2,
+      'inside' | 'borderline' | 'outside'
+    > = {
+      INSIDE: 'inside',
+      BORDERLINE: 'borderline',
+      OUTSIDE: 'outside',
+    };
+    const v2Classification = v2Coverage.classification;
+    const v2Assigned = v2Coverage.assignedZone;
+    const v2Closest = v2Coverage.closestZone;
+    const v2LegacyStatus = v2StatusToLegacy[v2Classification];
+    const v2IsBorderline = v2Classification === 'BORDERLINE';
+    const v2AssignedZoneName = v2Classification === 'OUTSIDE' ? null : (v2Assigned?.name ?? null);
+    const v2AssignedDistanceKm =
+      v2Assigned && v2Classification !== 'OUTSIDE'
+        ? Math.round(v2Assigned.distanceKm * 10) / 10
+        : null;
     if (trace) {
       this.logger.log(
         JSON.stringify({
@@ -368,6 +434,18 @@ export class GeoPricingService {
         }),
       );
     }
+
+    // ============================================================
+    // ⚠️ LEGACY ONLY (V1) — filterZones() NO INFLUYE en V2.
+    // Únicamente para logger traces 'geo.filtering' y para los
+    // flujos legacy classifyZones / selectBestZone que SOLO usamos
+    // para campos de depuración en logs.
+    //
+    // REGLA INQUEBRANTABLE:
+    //   ❌ NUNCA muevas la llamada a classifyCoverageV2 DESPUÉS de
+    //      esta línea. Si classifyCoverageV2 recibe distances[]
+    //      con <10 zonas, la regla INSIDE > BORDERLINE se rompe.
+    // ============================================================
     const covering = this.filterZones(distances);
     if (trace) {
       const passedSet = new Set(covering.map((c) => c.zone.name));
@@ -432,29 +510,47 @@ export class GeoPricingService {
           }),
         );
       }
+      // ============================================================
+      // ⚠️ OUTPUT V2 ONLY — covering.length === 0.
+      // Todos los campos derivan de v2* (v2Classification,
+      // v2LegacyStatus, v2Assigned, v2Closest, v2Coverage).
+      // 'covering.length === 0' de V1 NO fuerza OUTSIDE si
+      // v2Classification es BORDERLINE (ej: 0.3 km afuera,
+      // filterZones lo eliminó por epsilon 50m).
+      // ============================================================
       return {
-        status: 'outside',
-        assignedZone: null,
-        isBorderline: false,
-        distanceSurcharge: false,
-        distanceKm: null,
+        status: v2LegacyStatus,
+        assignedZone: v2AssignedZoneName,
+        isBorderline: v2IsBorderline,
+        distanceSurcharge: v2IsBorderline,
+        distanceKm: v2AssignedDistanceKm,
         lat,
         lng,
+        coverageClassification: v2Classification,
+        closestZoneName: v2Closest?.name ?? null,
+        closestZoneDistanceKm: v2Closest?.distanceKm ?? null,
+        v2BorderlineFeeApplicable: v2Coverage.feeApplicable,
+        borderlineOutsideThresholdKmV2: v2Coverage.borderlineOutsideThresholdKm,
       };
     }
 
+    // ============================================================
+    // CLASIFICACIÓN V1 LEGACY — SOLO para logger traces.
+    // NUNCA usar estos valores para construir el return; los
+    // returns usan v2* (ver abajo). selected / isBorderlineV1
+    // SOLO aparecen en geo.final_decision / geo.trace logs.
+    // ============================================================
     const classified = this.classifyZones(covering);
-    const { selected, isBorderline } = this.selectBestZone(classified);
-    const distanceKm = Math.round(selected.distanceKm * 10) / 10;
+    const { selected, isBorderline: isBorderlineV1 } = this.selectBestZone(classified);
     this.logger.log(
       JSON.stringify({
         event: 'geo.final_decision',
         isOutsideService: false,
         assignedZone: selected.zone.name,
-        reason: isBorderline
+        reason: isBorderlineV1
           ? 'borderline_zone_selected'
           : 'inside_zone_selected',
-        distanceKm,
+        distanceKm: Math.round(selected.distanceKm * 10) / 10,
         latLng: includePii ? { lat, lng } : undefined,
         inputAddress: includePii
           ? (traceContext?.inputAddress ?? null)
@@ -483,26 +579,38 @@ export class GeoPricingService {
           })),
           selectedZone: {
             name: selected.zone.name,
-            isBorderline,
+            isBorderline: isBorderlineV1,
             distanceKm: Math.round(selected.distanceKm * 1000) / 1000,
           },
           decision: {
             isOutsideService: false,
-            reason: isBorderline
+            reason: isBorderlineV1
               ? 'borderline_zone_selected'
               : 'inside_zone_selected',
           },
         }),
       );
     }
+    // ============================================================
+    // ⚠️ OUTPUT V2 ONLY — covering.length > 0.
+    // MISMO patrón que el return anterior: todos los campos
+    // derivan de v2* variables. selected / isBorderlineV1
+    // / classified / covering.length NO influyen NADA en el
+    // resultado final de esta función (solo están en logger).
+    // ============================================================
     return {
-      status: isBorderline ? 'borderline' : 'inside',
-      assignedZone: selected.zone.name,
-      isBorderline,
-      distanceSurcharge: isBorderline,
-      distanceKm,
+      status: v2LegacyStatus,
+      assignedZone: v2AssignedZoneName,
+      isBorderline: v2IsBorderline,
+      distanceSurcharge: v2IsBorderline,
+      distanceKm: v2AssignedDistanceKm,
       lat,
       lng,
+      coverageClassification: v2Classification,
+      closestZoneName: v2Closest?.name ?? null,
+      closestZoneDistanceKm: v2Closest?.distanceKm ?? null,
+      v2BorderlineFeeApplicable: v2Coverage.feeApplicable,
+      borderlineOutsideThresholdKmV2: v2Coverage.borderlineOutsideThresholdKm,
     };
   }
 
@@ -550,6 +658,132 @@ export class GeoPricingService {
       };
     }
     return { selected: pickClosest(classified.borderline), isBorderline: true };
+  }
+
+  // ========================================================================
+  // V2 Coverage Classification — relación con el BOUNDARY (NO distance from center).
+  // Preserva el comportamiento legacy V1 intacto.
+  // ========================================================================
+
+  /**
+   * @internal Publicado únicamente para suites de testeo unitario.
+   * La clasificación de cobertura V2 oficial la consume computeSurchargeInternal().
+   *
+   * ⚠️ PROHIBIDO FILTRAR `distances` ANTES DE LLAMAR ESTA FUNCIÓN.
+   * distances DEBE contener las 10 zonas COMPLETAS (sin filterZones,
+   * sin closest, sin slice). Si necesitas filtrar para logger legacy o flujos
+   * antiguos, hazlo DESPUÉS de esta llamada. Cualquier filtrado previo rompe
+   * la regla multi-zona "INSIDE > BORDERLINE > OUTSIDE".
+   */
+  classifyCoverageV2(distances: ZoneDistance[]): {
+    classification: GeoCoverageClassificationV2;
+    closestZone: { name: string; distanceKm: number; radiusKm: number } | null;
+    assignedZone: { name: string; distanceKm: number; radiusKm: number } | null;
+    feeApplicable: boolean;
+    borderlineOutsideThresholdKm: number;
+    debug: {
+      insideZonesNames: string[];
+      borderlineZonesNames: string[];
+      outsideZonesNames: string[];
+      totalEvaluated: number;
+    };
+  } {
+    if (!distances || distances.length === 0) {
+      return {
+        classification: 'OUTSIDE',
+        closestZone: null,
+        assignedZone: null,
+        feeApplicable: false,
+        borderlineOutsideThresholdKm: this.BORDERLINE_OUTSIDE_THRESHOLD_V2_KM,
+        debug: {
+          insideZonesNames: [],
+          borderlineZonesNames: [],
+          outsideZonesNames: [],
+          totalEvaluated: 0,
+        },
+      };
+    }
+
+    // ============================================================
+    // VALIDACIÓN DEFENSIVA — Prevenir filtrado accidental.
+    // SOLO con flag explícito GEO_PRICING_ASSERT_10_ZONES=1:
+    //   Si distances.length > 0 PERO !== 10 → throw Error inmediato
+    //   (alguien llamó a filterZones antes de classifyCoverageV2).
+    // Por defecto OFF para no romper suites unitarias que prueban
+    // escenarios reducidos (2 zonas, 1 zona) en test environment.
+    // ============================================================
+    const strictChecks = process.env.GEO_PRICING_ASSERT_10_ZONES === '1';
+    if (strictChecks && distances.length > 0 && distances.length !== 10) {
+      throw new Error(
+        `classifyCoverageV2 requires exactly 10 zones (all zones). Got ${distances.length}. ` +
+          `Possible PRE-filter bug: filterZones() or nearest slice called BEFORE classifyCoverageV2.`,
+      );
+    }
+
+    const threshold = this.BORDERLINE_OUTSIDE_THRESHOLD_V2_KM;
+
+    const insideZones = distances.filter(d => d.distanceKm <= d.zone.radiusKm);
+    const borderlineZones = distances.filter(
+      d => d.distanceKm > d.zone.radiusKm && d.distanceKm <= d.zone.radiusKm + threshold,
+    );
+    const outsideZones = distances.filter(
+      d => d.distanceKm > d.zone.radiusKm + threshold,
+    );
+
+    let assigned: ZoneDistance | null = null;
+    let classification: GeoCoverageClassificationV2;
+    let feeApplicable = false;
+
+    if (insideZones.length > 0) {
+      classification = 'INSIDE';
+      feeApplicable = false;
+      assigned = insideZones.reduce<ZoneDistance | null>((acc, curr) => {
+        if (!acc) return curr;
+        return curr.distanceKm < acc.distanceKm ? curr : acc;
+      }, null);
+    } else if (borderlineZones.length > 0) {
+      classification = 'BORDERLINE';
+      feeApplicable = true;
+      assigned = borderlineZones.reduce<ZoneDistance | null>((acc, curr) => {
+        if (!acc) return curr;
+        return curr.distanceKm < acc.distanceKm ? curr : acc;
+      }, null);
+    } else {
+      classification = 'OUTSIDE';
+      feeApplicable = false;
+      assigned = distances.reduce<ZoneDistance | null>((acc, curr) => {
+        if (!acc) return curr;
+        return curr.distanceKm < acc.distanceKm ? curr : acc;
+      }, null);
+    }
+
+    const overallClosest = distances.reduce<ZoneDistance | null>((acc, curr) => {
+      if (!acc) return curr;
+      return curr.distanceKm < acc.distanceKm ? curr : acc;
+    }, null);
+
+    const toShape = (zd: ZoneDistance | null) =>
+      zd
+        ? {
+            name: zd.zone.name,
+            distanceKm: Math.round(zd.distanceKm * 1000) / 1000,
+            radiusKm: zd.zone.radiusKm,
+          }
+        : null;
+
+    return {
+      classification,
+      closestZone: toShape(overallClosest),
+      assignedZone: toShape(assigned),
+      feeApplicable,
+      borderlineOutsideThresholdKm: threshold,
+      debug: {
+        insideZonesNames: insideZones.map(d => d.zone.name),
+        borderlineZonesNames: borderlineZones.map(d => d.zone.name),
+        outsideZonesNames: outsideZones.map(d => d.zone.name),
+        totalEvaluated: distances.length,
+      },
+    };
   }
 
   private haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
@@ -710,9 +944,93 @@ export class GeoPricingService {
     return result.reason === 'api_unavailable';
   }
 
+  private getMinimumAddressLength(): number {
+    if (
+      Number.isFinite(this.minimumAddressLength) &&
+      this.minimumAddressLength > 0
+    ) {
+      return Math.trunc(this.minimumAddressLength);
+    }
+    return 10;
+  }
+
+  private getProviderFailureCooldownMs(): number {
+    if (
+      Number.isFinite(this.providerFailureCooldownMs) &&
+      this.providerFailureCooldownMs > 0
+    ) {
+      return Math.trunc(this.providerFailureCooldownMs);
+    }
+    return 5 * 60 * 1000;
+  }
+
+  private shouldOpenProviderCooldown(result: GeocodeFail): boolean {
+    return (
+      result.reason === 'request_denied' || result.reason === 'quota_exceeded'
+    );
+  }
+
+  private activateProviderCooldown(result: GeocodeFail): void {
+    if (!this.shouldOpenProviderCooldown(result)) return;
+    const cooldownMs = this.getProviderFailureCooldownMs();
+    const until = Date.now() + cooldownMs;
+    this.providerCooldown = {
+      until,
+      reason: result.reason,
+      message: result.message,
+    };
+    this.logger.warn(
+      JSON.stringify({
+        event: 'geo.provider_cooldown_activated',
+        reason: result.reason,
+        cooldownMs,
+        until: new Date(until).toISOString(),
+      }),
+    );
+  }
+
+  private clearProviderCooldown(): void {
+    this.providerCooldown = null;
+  }
+
+  private getActiveProviderCooldown(): GeocodeProviderCooldownState | null {
+    if (!this.providerCooldown) return null;
+    if (Date.now() >= this.providerCooldown.until) {
+      this.providerCooldown = null;
+      return null;
+    }
+    return this.providerCooldown;
+  }
+
+  private getClientFacingGeocodeErrorMessage(result: GeocodeFail): string {
+    if (result.reason === 'request_denied') {
+      return 'Address verification is temporarily unavailable due to geocoding provider configuration.';
+    }
+    if (result.reason === 'quota_exceeded') {
+      return 'Address verification is temporarily unavailable due to geocoding provider quota limits.';
+    }
+    return result.message;
+  }
+
   private async geocodeAddress(
     address: string,
   ): Promise<GeocodeOk | GeocodeFail> {
+    const providerCooldown = this.getActiveProviderCooldown();
+    if (providerCooldown) {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'geo.provider_cooldown_active',
+          reason: providerCooldown.reason,
+          until: new Date(providerCooldown.until).toISOString(),
+        }),
+      );
+      return {
+        ok: false,
+        reason: providerCooldown.reason,
+        message: providerCooldown.message,
+      };
+    }
+
     const apiKey = this.getServerGeocodingApiKey();
     if (!apiKey) {
       return {
@@ -852,11 +1170,17 @@ export class GeoPricingService {
         remainingMs,
       );
       const result = await attemptOnce(attemptTimeoutMs);
-      if (result.ok) return result;
+      if (result.ok) {
+        this.clearProviderCooldown();
+        return result;
+      }
       const canRetry =
         attempt < this.geocodeMaxRetries &&
         this.isRetryableGeocodeFailure(result);
-      if (!canRetry) return result;
+      if (!canRetry) {
+        this.activateProviderCooldown(result);
+        return result;
+      }
       const backoffMs = 250 * 2 ** attempt;
       if (deadline - Date.now() <= 0) return result;
       await this.sleep(Math.min(backoffMs, Math.max(0, deadline - Date.now())));

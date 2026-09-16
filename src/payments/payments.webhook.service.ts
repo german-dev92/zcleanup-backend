@@ -4,6 +4,7 @@ import {
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model } from 'mongoose';
 import {
@@ -24,6 +25,8 @@ type StripeWebhookEvent = {
       payment_status?: string;
       metadata?: {
         bookingId?: string;
+        quoteVersion?: string;
+        quotedAmount?: string;
       };
     };
   };
@@ -39,6 +42,7 @@ export class PaymentsWebhookService {
     @InjectModel(Payment.name)
     private readonly paymentModel: Model<PaymentDocument>,
     private readonly stripeService: StripeService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async handleWebhook(payload: Buffer, signature: string): Promise<void> {
@@ -93,6 +97,8 @@ export class PaymentsWebhookService {
     const paymentIntentId = event.data?.object?.payment_intent;
 
     const bookingId = event.data?.object?.metadata?.bookingId;
+    const quoteVersion = event.data?.object?.metadata?.quoteVersion;
+    const quotedAmount = event.data?.object?.metadata?.quotedAmount;
 
     if (typeof bookingId !== 'string' || !bookingId.trim()) {
       throw new InternalServerErrorException('Invalid webhook payload');
@@ -135,12 +141,13 @@ export class PaymentsWebhookService {
       return;
     }
 
+    const paymentContext = this.resolveWebhookPaymentContext(
+      booking,
+      quoteVersion,
+      quotedAmount,
+    );
     const current = booking.status;
-    const eligible =
-      current === 'confirmed' ||
-      current === 'assigned' ||
-      current === 'in_progress' ||
-      current === 'completed';
+    const eligible = paymentContext.eligible;
     if (!eligible) {
       this.logger.warn(
         JSON.stringify({
@@ -148,27 +155,20 @@ export class PaymentsWebhookService {
           reason: 'not_eligible_for_payment',
           bookingId,
           current,
+          commercialStatus:
+            typeof booking.commercialStatus === 'string'
+              ? booking.commercialStatus
+              : null,
+          paymentLifecycleStatus:
+            typeof booking.paymentLifecycleStatus === 'string'
+              ? booking.paymentLifecycleStatus
+              : null,
         }),
       );
       return;
     }
 
-    const expectedAmount = booking.finalPricePreview;
-    const isValidExpectedAmount =
-      typeof expectedAmount === 'number' &&
-      Number.isFinite(expectedAmount) &&
-      expectedAmount > 0;
-    if (!isValidExpectedAmount) {
-      this.logger.error(
-        JSON.stringify({
-          event: 'stripe.webhook.refused',
-          reason: 'invalid_booking_price',
-          bookingId,
-        }),
-      );
-      return;
-    }
-
+    const expectedAmount = paymentContext.expectedAmount;
     const expectedAmountCents = toStripeAmountCents(expectedAmount);
     if (
       !Number.isSafeInteger(expectedAmountCents) ||
@@ -221,7 +221,6 @@ export class PaymentsWebhookService {
           provider: 'stripe',
           amount: expectedAmount,
           currency: typeof currency === 'string' ? currency : 'usd',
-          status: 'paid',
         },
         $set: {
           status: 'paid',
@@ -283,10 +282,19 @@ export class PaymentsWebhookService {
     }
 
     booking.paymentStatus = 'paid';
+    if (paymentContext.mode === 'quote_flow') {
+      booking.paymentLifecycleStatus = 'paid';
+    }
     if (!booking.paidAt) {
       booking.paidAt = new Date();
     }
     await booking.save();
+    this.eventEmitter.emit('booking.payment_received', {
+      ...(typeof booking.toObject === 'function'
+        ? booking.toObject()
+        : (booking as unknown as Record<string, unknown>)),
+      bookingId: String(booking._id),
+    });
     this.logger.log(
       JSON.stringify({ event: 'stripe.webhook.booking_paid', bookingId }),
     );
@@ -305,5 +313,138 @@ export class PaymentsWebhookService {
     }
 
     return true;
+  }
+
+  /**
+   * Determina el contexto financiero esperado del webhook.
+   *
+   * OBJETIVO:
+   * - Reutilizar la lógica legacy sin romper producción.
+   * - Validar que los pagos del quote-flow correspondan a la cotización
+   *   aceptada e invoice preparada.
+   */
+  private resolveWebhookPaymentContext(
+    booking: BookingDocument,
+    metadataQuoteVersion?: string,
+    metadataQuotedAmount?: string,
+  ): {
+    mode: 'legacy' | 'quote_flow';
+    eligible: boolean;
+    expectedAmount: number;
+  } {
+    const commercialStatus =
+      typeof booking.commercialStatus === 'string'
+        ? booking.commercialStatus
+        : null;
+    const isQuoteFlow =
+      commercialStatus !== null && commercialStatus !== 'legacy_direct_booking';
+
+    if (!isQuoteFlow) {
+      const current = booking.status;
+      const eligible =
+        current === 'confirmed' ||
+        current === 'assigned' ||
+        current === 'in_progress' ||
+        current === 'completed';
+
+      return {
+        mode: 'legacy',
+        eligible,
+        expectedAmount: this.ensurePositiveAmount(
+          booking.finalPricePreview,
+          'legacy',
+        ),
+      };
+    }
+
+    const paymentLifecycleStatus =
+      typeof booking.paymentLifecycleStatus === 'string'
+        ? booking.paymentLifecycleStatus
+        : null;
+    const eligible =
+      commercialStatus === 'quote_accepted' &&
+      (paymentLifecycleStatus === 'invoice_ready' ||
+        paymentLifecycleStatus === 'checkout_created' ||
+        paymentLifecycleStatus === 'payment_pending' ||
+        paymentLifecycleStatus === 'paid');
+
+    const quote =
+      booking.quote && typeof booking.quote === 'object'
+        ? (booking.quote as unknown as Record<string, unknown>)
+        : null;
+    const expectedAmount = this.ensurePositiveAmount(
+      quote?.finalQuotedPrice,
+      'quote_flow',
+    );
+    const expectedQuotedAmount = expectedAmount.toFixed(2);
+    const expectedQuoteVersion =
+      typeof quote?.version === 'number' &&
+      Number.isFinite(quote.version) &&
+      quote.version > 0
+        ? String(quote.version)
+        : '0';
+
+    if (
+      typeof metadataQuoteVersion === 'string' &&
+      metadataQuoteVersion &&
+      metadataQuoteVersion !== expectedQuoteVersion
+    ) {
+      this.logger.error(
+        JSON.stringify({
+          event: 'stripe.webhook.refused',
+          reason: 'quote_version_mismatch',
+          bookingId: String(booking._id),
+          expectedQuoteVersion,
+          metadataQuoteVersion,
+        }),
+      );
+      return {
+        mode: 'quote_flow',
+        eligible: false,
+        expectedAmount,
+      };
+    }
+
+    if (
+      typeof metadataQuotedAmount === 'string' &&
+      metadataQuotedAmount &&
+      metadataQuotedAmount !== expectedQuotedAmount
+    ) {
+      this.logger.error(
+        JSON.stringify({
+          event: 'stripe.webhook.refused',
+          reason: 'quoted_amount_mismatch',
+          bookingId: String(booking._id),
+          expectedQuotedAmount,
+          metadataQuotedAmount,
+        }),
+      );
+      return {
+        mode: 'quote_flow',
+        eligible: false,
+        expectedAmount,
+      };
+    }
+
+    return {
+      mode: 'quote_flow',
+      eligible,
+      expectedAmount,
+    };
+  }
+
+  private ensurePositiveAmount(value: unknown, mode: 'legacy' | 'quote_flow') {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      this.logger.error(
+        JSON.stringify({
+          event: 'stripe.webhook.refused',
+          reason: 'invalid_expected_amount',
+          mode,
+        }),
+      );
+      return 0;
+    }
+
+    return value;
   }
 }
